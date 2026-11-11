@@ -121,7 +121,7 @@ Huffman's; the multiset permutation won on every test file (binary −3,182 bits
 
 Each placed symbol's canonical code is coded one bit at a time, each bit being the choice
 at one code tree node. The prediction for a node comes from the **last choice** taken at
-the same (order-3 context, code tree node): the remembered side gets 3/4, the other 1/4;
+the same (order-3 context, code tree node): the remembered side gets 7/8, the other 1/8;
 a pair never seen gets 1/2 (the Huffman tree's own split). After each bit the last choice
 is overwritten. Encoder and decoder hold the same memory, so nothing is stored for it.
 Before the first 3 symbols a start marker stands in for the missing positions (MINE).
@@ -146,7 +146,8 @@ rows were measured on the way and not kept: one counter per node, its value c in
 | Body coding | binary | packed 5-bit | Rust source | early builder | **total (4)** | *random* |
 |---|---|---|---|---|---|---|
 | canonical Huffman codes | 51,055 | 42,477 | 97,260 | 44,200 | 234,992 | *79,367* |
-| **last choice 3/4, order 3 (current)** | **46,055** | **43,199** | **79,117** | **39,125** | **207,496** | *83,311* |
+| **last choice 7/8, order 3 (current)** | **46,791** | **47,143** | **73,877** | **37,805** | **205,616** | *91,015* |
+| last choice 3/4, order 3 | 46,055 | 43,199 | 79,117 | 39,125 | 207,496 | *83,311* |
 | last choice 2/3, order 3 | 46,983 | 42,263 | 84,061 | 40,485 | 213,792 | *80,919* |
 | 3-bit counters ±1, order 3, one per pair | 45,535 | 42,879 | 80,917 | 39,749 | 209,080 | *83,663* |
 | 2-bit counters ±1 (same as +2/−1), order 3 | 46,327 | 43,559 | 80,957 | 39,901 | 210,744 | *84,447* |
@@ -220,6 +221,12 @@ own source); the files are now named for what they are. Real prose (the 643 KB v
 manual) is in the test set for larger runs.
 
 ## Observations from measurement
+
+- Against general-purpose compressors on the four test files (bits, lower is better):
+  PPMd order 6 114,968; bzip2 9 122,368; brotli 11 125,616; LZMA2 9e 130,904;
+  zstd 19 132,064; deflate 9 139,360; ASLE (n = 16, 7/8) 205,616. ASLE is closest on the
+  packed 5-bit fields (47,143 against bzip2's 37,696) and about 2.2× the best on binary
+  and text. Random grows 39% (the others store it).
 
 - As n grows, the body shrinks steadily and the header grows: long symbols copy the
   input into the dictionary. Totals bottom out at n = 24–32 on structured data.

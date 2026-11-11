@@ -4,7 +4,7 @@
 //! The context is the last 3 placed symbols (their depth-first positions;
 //! START_MARKER stands in before the first ones: MINE). Every (context, code
 //! tree node) remembers the last choice taken there: the remembered side gets
-//! probability 3/4, the other 1/4; with nothing remembered yet, 1/2 each
+//! probability 7/8, the other 1/8; with nothing remembered yet, 1/2 each
 //! (the Huffman tree's own split). After each choice the memory is updated.
 //! Encoder and decoder keep the same memory, so nothing is stored for it.
 
@@ -13,9 +13,9 @@ use crate::bit_io::{BitReader, BitWriter};
 use crate::canonical_huffman_code::CanonicalHuffmanDecoder;
 use crate::fast_hash::FastHashMap;
 
-/// The user's choice: the remembered side of a node is predicted 3/4 to 1/4
-/// (exact in 2^32: 3 * 2^30; 2/3 measured too, 3% worse).
-const REMEMBERED_SIDE_PROBABILITY: Probability = 3 << 30;
+/// The user's choice: the remembered side of a node is predicted 7/8 to 1/8
+/// (exact in 2^32: 7 * 2^29; 3/4 and 2/3 measured first).
+const REMEMBERED_SIDE_PROBABILITY: Probability = 7 << 29;
 const START_MARKER: u32 = u32::MAX;
 
 /// The last 3 placed symbols' positions, oldest first.
