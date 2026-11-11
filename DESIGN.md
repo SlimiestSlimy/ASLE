@@ -56,19 +56,27 @@ boundaries.
 5. **Judged on the whole.** A change (merge or leaf removal) commits when it strictly
    lowers the total encoded symbol bits (sum over all leaves of frequency × Huffman code
    length). The header never enters a decision.
-6. **Best point.** Every window size commits at least one merge: if a window size
-   reaches a round where no merge lowers the total and it has not committed a merge yet,
-   its best-ranked merge is committed anyway. *Why:* from the start state no single merge
-   can lower the total on text-like data (the first new leaf pushes `0` or `1` a level
-   deeper), so judging on the whole alone committed nothing on the Rust files.
-7. **Leaf removal first.** Each round, before merges: leaves whose code is longer than
+6. **Best point.** Once per window size, a change is forced: if a window size reaches a
+   round where no change lowers the total, and it has neither committed a merge nor forced
+   a change yet, the best change of the whole pool is committed anyway. The pool is every
+   ranked merge and every respellable non-saving leaf's removal; best is the lowest total
+   after; ties: fewer leaves after, then the removal, then merge rank (tie-breaks MINE).
+   *Why:* from the start state no single merge can lower the total on text-like data (the
+   first new leaf pushes `0` or `1` a level deeper), so judging on the whole alone
+   committed nothing on the Rust files; the pool lets the forced change be a removal.
+7. **Leaves placed once go.** Each round, first: a leaf placed only once is removed
+   whether or not the total drops, respelled with other live leaves (fewest code bits).
+   Several: lowest symbol id first (MINE). *Why:* a single placement cannot save anything
+   in the body, and the builder was removing far too few leaves (22 removals against
+   646–1,347 merges).
+8. **Leaf removal first.** Each round, then, before merges: leaves whose code is longer than
    their own bits (break-even leaves stay: they are building blocks) are checked, biggest
    loss first (frequency × (code length − bit length)); the first whose respelling with
    other live leaves (fewest code bits, exact) lowers the total is removed.
-8. **Ranking.** score = frequency × (1 + (bits_before − bits_after) / bits_before), bits =
+9. **Ranking.** score = frequency × (1 + (bits_before − bits_after) / bits_before), bits =
    encoded symbol bits; exact integer comparison. Ties: higher frequency, then smaller
    bit value. Scores are recomputed after every change, since the tree changes.
-9. **Stopping.** A window size ends when a pass commits nothing, or when an exact state
+10. **Stopping.** A window size ends when a pass commits nothing, or when an exact state
    (all frequencies) repeats (a removal puts placements back, so merges and removals
    could undo each other).
 
@@ -164,6 +172,17 @@ pairs are seen about twice (Rust source: 88,967 node visits over 50,624 pairs), 
 why a 2^16 table collides (30% of the pairs on the Rust source) and wide counters stay
 near 1/2.
 
+### Forced pool and leaves placed once (n = 16; whole stream in **bits**; random is a noise reference, not counted)
+
+A different file set from the tables above: the testbench's file samples (ELF binary
+/usr/bin/ls 16 KB, GPL-3 text, packed 5-bit fields, Rust source 16 KB, early builder
+source 8 KB), measured with the exact bit counts.
+
+| Builder | ELF | GPL-3 | packed 5-bit | Rust source | early builder | **total (5)** | *random* |
+|---|---|---|---|---|---|---|---|
+| one forced merge per window size (405864f) | 68,173 | 148,922 | 50,849 | 61,721 | 35,047 | 364,712 | *92,579* |
+| **forced pool + leaves placed once removed (current)** | **67,673** | **148,836** | **50,481** | **59,982** | **35,641** | **362,613** | *100,055* |
+
 ### Builder versions (n = 16, previous container)
 
 | Version | text 7,346 | binary 16,384 | packed 5-bit 10,000 | Rust source 16,384 | random 8,192 |
@@ -252,6 +271,11 @@ manual) is in the test set for larger runs.
   measuring the header?
 - Building time grows quickly with input size: every round re-predicts every candidate
   with a full Huffman rebuild (the 643 KB vim manual took ~2.5 min per window size by 17).
+  Callgrind (current builder, early builder source 8 KB, n = 16, 7.30 billion
+  instructions): 99.3% in the builder, 90.7% in full Huffman rebuilds
+  (`calculate_code_lengths`), 59.4% in its heap's pop alone; 56.8% called from leaf
+  removal predictions, 37.8% from merge predictions. Not yet profiled: the builder
+  before the forced pool, so the cost of the new rules is unknown.
 
 ---
 

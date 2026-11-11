@@ -136,7 +136,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
     fn on_leaf_removed(&mut self, event: &LeafRemoved, stream_after: &SymbolStream) {
         self.commit_number += 1;
         let fields = format!(
-            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"removed_symbol\":\"{}\",\"removed_frequency\":{},\"removed_bit_length\":{},\"removed_code_length_before\":{},\"removed_code_bits_before\":{},\"respelled_as\":[{}],\"replacement_code_bits_after\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after\":{},\"leaves_before\":{},\"non_saving_leaves\":{},",
+            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"removed_symbol\":\"{}\",\"removed_frequency\":{},\"removed_bit_length\":{},\"removed_code_length_before\":{},\"removed_code_bits_before\":{},\"respelled_as\":[{}],\"replacement_code_bits_after\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after\":{},\"leaves_before\":{},\"non_saving_leaves\":{},\"lowered_the_total\":{},\"removed_because_placed_once\":{},",
             self.commit_number,
             event.window_bit_length,
             event.pass_number,
@@ -151,19 +151,23 @@ impl BuilderObserver for JsonLinesEncoderLog {
             event.encoded_symbol_bits_before,
             event.encoded_symbol_bits_after,
             event.leaves_before,
-            event.non_saving_leaves
+            event.non_saving_leaves,
+            event.lowered_the_total,
+            event.removed_because_placed_once
         );
         self.write_line("leaf_removed", fields, stream_after);
     }
 
     fn on_window_size_finished(&mut self, event: &WindowSizeFinished, stream: &SymbolStream) {
         let fields = format!(
-            "\"window_bit_length\":{},\"passes\":{},\"merges_committed\":{},\"merge_committed_without_lowering_the_total\":{},\"leaves_removed\":{},\"stopped_by_repeated_state\":{},\"merges_evaluated\":{},\"elapsed_milliseconds\":{},",
+            "\"window_bit_length\":{},\"passes\":{},\"merges_committed\":{},\"merge_committed_without_lowering_the_total\":{},\"leaf_removed_without_lowering_the_total\":{},\"leaves_removed\":{},\"single_placement_leaves_removed\":{},\"stopped_by_repeated_state\":{},\"merges_evaluated\":{},\"elapsed_milliseconds\":{},",
             event.window_bit_length,
             event.passes,
             event.merges_committed,
             event.merge_committed_without_lowering_the_total,
+            event.leaf_removed_without_lowering_the_total,
             event.leaves_removed,
+            event.single_placement_leaves_removed,
             event.stopped_by_repeated_state,
             event.merges_evaluated,
             event.elapsed_milliseconds

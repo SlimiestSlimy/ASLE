@@ -3,6 +3,10 @@
 //! For each window size 2..=n, passes repeat until a pass commits nothing (or
 //! an exact state repeats). A pass finds the merge candidates once, then runs
 //! rounds. Each round, against the current state:
+//! 0. A leaf placed only once is removed automatically, respelled with other
+//!    live leaves (fewest code bits), whether or not the total drops (the
+//!    user's rule, 2026-11-11): it cannot save anything in the body. Several:
+//!    lowest symbol id first (MINE). Positions change, so the pass ends.
 //! 1. Leaf removal first: every leaf whose code is longer than its own bits
 //!    (non-saving; break-even leaves stay), biggest loss first, is predicted respelled with other
 //!    live leaves (fewest code bits); the first that can be respelled and is
@@ -15,11 +19,16 @@
 //! all leaves of frequency * Huffman code length). Header bits never enter a
 //! decision. A merge must also repeat: 2 or more non-overlapping occurrences.
 //!
-//! Best point: every window size commits at least one merge. If a window size
-//! reaches a round where no merge lowers the total and it has not committed a
-//! merge yet, its best-ranked merge is committed anyway; after that the normal
-//! rule applies again. This gets the build past points where only several
-//! merges together pay off.
+//! Best point: once per window size, a change is forced. If a window size
+//! reaches a round where no change lowers the total, and it has neither
+//! committed a merge nor forced a change yet, the best change of the whole pool
+//! is committed anyway: every ranked merge and every respellable non-saving
+//! leaf's removal (the user's rule, 2026-11-11). Best, as everywhere else, is
+//! the lowest total encoded symbol bits after the change; ties go to fewer
+//! leaves after, then to the removal, then to merge rank order (tie-breaks
+//! MINE). After that the normal rule applies again. This gets the build past
+//! points where only several merges together pay off, and lets it remove a
+//! leaf there instead of adding one.
 //!
 //! A removal puts placements back, so a merge and a removal could undo each
 //! other; a window size stops when an exact state (all frequencies) repeats.
@@ -33,6 +42,7 @@ use crate::merge_candidates::{find_merge_candidates, select_most_non_overlapping
 use crate::option_ranking::{calculate_score_numerator, compare_by_rank};
 use crate::predicted_changes::{LeafRemovalPrediction, MergePrediction};
 use crate::symbol_stream::{count_leaves, SymbolStream};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -63,6 +73,8 @@ fn run_window_size(
         merges_committed: 0,
         merge_committed_without_lowering_the_total: false,
         leaves_removed: 0,
+        leaf_removed_without_lowering_the_total: false,
+        single_placement_leaves_removed: 0,
         stopped_by_repeated_state: false,
         merges_evaluated: 0,
         elapsed_milliseconds: 0,
@@ -124,9 +136,16 @@ fn run_pass(
             code_lengths_before,
             leaves_before: stream.leaf_count(),
         };
-        let removal_scan = find_leaf_to_remove(stream, &context);
-        if let Some(removal) = removal_scan.removal {
-            report_and_apply_leaf_removal(stream, removal, &context, removal_scan.non_saving_leaves, observer);
+        if let Some(removal) = find_single_placement_leaf_to_remove(stream, &context) {
+            report_and_apply_leaf_removal(stream, removal, &context, 0, true, observer);
+            summary.leaves_removed += 1;
+            summary.single_placement_leaves_removed += 1;
+            // Positions changed; the candidates are stale. The next pass rescans.
+            return changes_committed + 1;
+        }
+        let mut removal_scan = find_leaf_to_remove(stream, &context);
+        if let Some(removal) = removal_scan.removal.take() {
+            report_and_apply_leaf_removal(stream, removal, &context, removal_scan.non_saving_leaves, false, observer);
             summary.leaves_removed += 1;
             // Positions changed; the candidates are stale. The next pass rescans.
             return changes_committed + 1;
@@ -140,20 +159,32 @@ fn run_pass(
             &mut candidate_finished,
             observer,
         );
-        let committed = commit_best_merge(
+        let outcome = commit_best_merge(
             stream,
             ranked_merges,
             &context,
+            &removal_scan,
             &mut position_consumed_this_pass,
             &mut candidate_finished,
             summary,
             observer,
         );
-        if !committed {
-            break;
+        match outcome {
+            RoundOutcome::NothingCommitted => break,
+            RoundOutcome::MergeCommitted => {
+                changes_committed += 1;
+                summary.merges_committed += 1;
+            }
+            RoundOutcome::LeafRemovalForced => {
+                let removal = removal_scan.best_removal_not_lowering.take().expect("a forced removal was predicted");
+                summary.leaf_removed_without_lowering_the_total = true;
+                report_and_apply_leaf_removal(stream, removal, &context, removal_scan.non_saving_leaves, false, observer);
+                summary.leaves_removed += 1;
+                // Positions changed; the candidates are stale. The next pass rescans.
+                stream.remove_vacated_positions();
+                return changes_committed + 1;
+            }
         }
-        changes_committed += 1;
-        summary.merges_committed += 1;
     }
     stream.remove_vacated_positions();
     changes_committed
@@ -163,11 +194,25 @@ struct LeafRemovalScan {
     non_saving_leaves: usize,
     non_saving_leaves_unspellable: usize,
     removal: Option<LeafRemovalPrediction>,
+    /// When no removal lowers the total: the removal with the lowest total
+    /// after (first in scan order on ties), for the forced pick.
+    best_removal_not_lowering: Option<LeafRemovalPrediction>,
 }
 
 /// Leaf removal rule: the total encoded symbol bits must strictly drop.
 fn leaf_removal_lowers_encoded_symbol_bits(removal: &LeafRemovalPrediction, context: &RoundContext) -> bool {
     removal.encoded_symbol_bits_after < context.encoded_symbol_bits_before
+}
+
+/// Analysis + decision: the first leaf placed only once (lowest symbol id)
+/// that can be respelled with other live leaves.
+fn find_single_placement_leaf_to_remove(stream: &SymbolStream, context: &RoundContext) -> Option<LeafRemovalPrediction> {
+    stream
+        .symbol_frequencies
+        .iter()
+        .enumerate()
+        .filter(|&(_, &frequency)| frequency == 1)
+        .find_map(|(symbol_id, _)| predict_leaf_removal(stream, symbol_id, &context.code_lengths_before))
 }
 
 /// Analysis + decision: the first non-saving leaf (biggest loss first) that
@@ -178,6 +223,7 @@ fn find_leaf_to_remove(stream: &SymbolStream, context: &RoundContext) -> LeafRem
         non_saving_leaves: non_saving_leaf_ids.len(),
         non_saving_leaves_unspellable: 0,
         removal: None,
+        best_removal_not_lowering: None,
     };
     for symbol_id in non_saving_leaf_ids {
         match predict_leaf_removal(stream, symbol_id, &context.code_lengths_before) {
@@ -185,7 +231,15 @@ fn find_leaf_to_remove(stream: &SymbolStream, context: &RoundContext) -> LeafRem
             Some(removal) => {
                 if leaf_removal_lowers_encoded_symbol_bits(&removal, context) {
                     scan.removal = Some(removal);
+                    scan.best_removal_not_lowering = None;
                     break;
+                }
+                let lower_than_best = match &scan.best_removal_not_lowering {
+                    None => true,
+                    Some(best) => removal.encoded_symbol_bits_after < best.encoded_symbol_bits_after,
+                };
+                if lower_than_best {
+                    scan.best_removal_not_lowering = Some(removal);
                 }
             }
         }
@@ -198,6 +252,7 @@ fn report_and_apply_leaf_removal(
     removal: LeafRemovalPrediction,
     context: &RoundContext,
     non_saving_leaves: usize,
+    removed_because_placed_once: bool,
     observer: &mut dyn BuilderObserver,
 ) {
     let event = LeafRemoved {
@@ -215,6 +270,8 @@ fn report_and_apply_leaf_removal(
         encoded_symbol_bits_after: removal.encoded_symbol_bits_after,
         leaves_before: context.leaves_before,
         non_saving_leaves,
+        lowered_the_total: removal.encoded_symbol_bits_after < context.encoded_symbol_bits_before,
+        removed_because_placed_once,
     };
     stream.apply_leaf_removal(&removal);
     observer.on_leaf_removed(&event, stream);
@@ -278,25 +335,65 @@ fn merge_lowers_encoded_symbol_bits(merge: &MergePrediction, context: &RoundCont
     merge.encoded_symbol_bits_after < context.encoded_symbol_bits_before
 }
 
+enum RoundOutcome {
+    MergeCommitted,
+    /// The forced pick was a leaf removal; the caller applies it.
+    LeafRemovalForced,
+    NothingCommitted,
+}
+
+enum ForcedChoice {
+    Merge(usize),
+    LeafRemoval,
+}
+
+/// Best point: the change of the whole pool with the lowest total after;
+/// ties: fewer leaves after, then the removal, then merge rank order.
+fn choose_forced_change(ranked_merges: &[MergePrediction], removal_scan: &LeafRemovalScan) -> Option<ForcedChoice> {
+    let mut best: Option<(u64, usize, ForcedChoice)> = removal_scan.best_removal_not_lowering.as_ref().map(|removal| {
+        (removal.encoded_symbol_bits_after, count_leaves(&removal.symbol_frequencies_after), ForcedChoice::LeafRemoval)
+    });
+    for (rank_position, merge) in ranked_merges.iter().enumerate() {
+        let key = (merge.encoded_symbol_bits_after, count_leaves(&merge.symbol_frequencies_after));
+        let better = match &best {
+            None => true,
+            Some((best_bits, best_leaves, _)) => key.cmp(&(*best_bits, *best_leaves)) == Ordering::Less,
+        };
+        if better {
+            best = Some((key.0, key.1, ForcedChoice::Merge(rank_position)));
+        }
+    }
+    best.map(|(_, _, choice)| choice)
+}
+
 /// Decision + application: commit the highest-ranked merge that lowers the
-/// total. If none does and this window size has not committed a merge yet,
-/// commit the highest-ranked merge anyway (best point). Returns whether a
-/// merge was committed.
+/// total. If none does and this window size has neither committed a merge
+/// nor forced a change yet, force the best change of the whole pool (best
+/// point): a merge is committed here, a leaf removal is handed back.
 fn commit_best_merge(
     stream: &mut SymbolStream,
     ranked_merges: Vec<MergePrediction>,
     context: &RoundContext,
+    removal_scan: &LeafRemovalScan,
     position_consumed_this_pass: &mut [bool],
     candidate_finished: &mut [bool],
     summary: &mut WindowSizeFinished,
     observer: &mut dyn BuilderObserver,
-) -> bool {
+) -> RoundOutcome {
     let first_lowering_rank_position =
         ranked_merges.iter().position(|merge| merge_lowers_encoded_symbol_bits(merge, context));
-    let window_size_has_no_merge_yet = summary.merges_committed == 0;
+    let forced_change_allowed = summary.merges_committed == 0 && !summary.leaf_removed_without_lowering_the_total;
+    let mut leaf_removal_forced = false;
     let chosen_rank_position = match first_lowering_rank_position {
         Some(rank_position) => Some(rank_position),
-        None if window_size_has_no_merge_yet && !ranked_merges.is_empty() => Some(0),
+        None if forced_change_allowed => match choose_forced_change(&ranked_merges, removal_scan) {
+            Some(ForcedChoice::Merge(rank_position)) => Some(rank_position),
+            Some(ForcedChoice::LeafRemoval) => {
+                leaf_removal_forced = true;
+                None
+            }
+            None => None,
+        },
         None => None,
     };
     let evaluated_count = match first_lowering_rank_position {
@@ -321,7 +418,10 @@ fn commit_best_merge(
             observer.on_merge_rejected(&rejected, stream);
         }
     }
-    let Some(chosen_rank_position) = chosen_rank_position else { return false };
+    if leaf_removal_forced {
+        return RoundOutcome::LeafRemovalForced;
+    }
+    let Some(chosen_rank_position) = chosen_rank_position else { return RoundOutcome::NothingCommitted };
     let merge = &ranked_merges[chosen_rank_position];
     if !merge_lowers_encoded_symbol_bits(merge, context) {
         summary.merge_committed_without_lowering_the_total = true;
@@ -329,7 +429,7 @@ fn commit_best_merge(
     let committed = describe_merge_before_applying(stream, merge, context, chosen_rank_position);
     stream.apply_merge(merge, position_consumed_this_pass);
     observer.on_change_committed(&committed, stream);
-    true
+    RoundOutcome::MergeCommitted
 }
 
 /// Builds the full record of a merge from the state before it is applied.

@@ -95,6 +95,10 @@ pub struct LeafRemoved {
     pub encoded_symbol_bits_after: u64,
     pub leaves_before: usize,
     pub non_saving_leaves: usize,
+    /// False when the removal was forced or removed a leaf placed once.
+    pub lowered_the_total: bool,
+    /// Removed automatically: the leaf was placed only once.
+    pub removed_because_placed_once: bool,
 }
 
 pub struct WindowSizeFinished {
@@ -103,7 +107,11 @@ pub struct WindowSizeFinished {
     pub merges_committed: u32,
     /// The window size's best-ranked merge was committed without lowering the total.
     pub merge_committed_without_lowering_the_total: bool,
+    /// The window size's forced change was a leaf removal.
+    pub leaf_removed_without_lowering_the_total: bool,
     pub leaves_removed: u32,
+    /// Of leaves_removed, those removed automatically for being placed once.
+    pub single_placement_leaves_removed: u32,
     pub stopped_by_repeated_state: bool,
     pub merges_evaluated: u64,
     pub elapsed_milliseconds: u128,
