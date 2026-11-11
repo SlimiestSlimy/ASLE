@@ -16,7 +16,6 @@ use crate::builder_events::BuilderObserver;
 use crate::canonical_huffman_code::{assign_canonical_codes, CanonicalHuffmanDecoder};
 use crate::range_coded_body::{decode_body, encode_body};
 use crate::code_length_section::{measure_code_length_section_bit_count, read_code_length_section, write_code_length_section};
-use crate::huffman_tree::calculate_code_lengths;
 use crate::packed_bit_sequence::PackedBitSequence;
 use crate::symbol_builder::build_symbol_dictionary;
 use crate::symbol_definition::SymbolDefinition;
@@ -37,7 +36,7 @@ fn describe_leaves_prefix_tree(stream: &SymbolStream) -> SymbolPrefixTreeDescrip
 
 /// The builder's Huffman code lengths, listed in the prefix tree's depth-first symbol order.
 fn code_lengths_in_depth_first_order(stream: &SymbolStream, prefix_tree: &SymbolPrefixTreeDescription) -> Vec<u32> {
-    let code_lengths_by_symbol_id = calculate_code_lengths(&stream.symbol_frequencies);
+    let code_lengths_by_symbol_id = stream.code_lengths_by_symbol_id();
     prefix_tree.symbol_ids_depth_first.iter().map(|&symbol_id| code_lengths_by_symbol_id[symbol_id]).collect()
 }
 
@@ -143,6 +142,11 @@ pub fn decompress_container(container_bytes: &[u8]) -> (Vec<u8>, u64) {
     assert_eq!(code_lengths_in_order.len(), symbol_definitions_depth_first.len(), "code lengths and prefix tree disagree");
     let decoder = CanonicalHuffmanDecoder::from_code_lengths(&code_lengths_in_order);
     let placed_positions = decode_body(&mut bit_reader, placed_symbol_count, &decoder);
+    let file_bits = 8 * container_bytes.len() as u64;
+    assert!(
+        bit_reader.bits_read() <= file_bits && file_bits - bit_reader.bits_read() < 8,
+        "the body must end in the file's last byte, only padding after it"
+    );
     let mut output_writer = BitWriter::new();
     for position in placed_positions {
         let definition = symbol_definitions_depth_first[position];

@@ -124,6 +124,13 @@ pub struct BuildFinished {
 
 /// Every method has an empty default, so an observer implements only what it needs.
 pub trait BuilderObserver {
+    /// Whether events should carry code lengths after a change
+    /// (merged_code_bits_after, replacement_code_bits_after). They take a
+    /// Huffman build per event, so they are computed only for an observer
+    /// that asks (the JSON lines log); otherwise they are 0.
+    fn wants_code_lengths_after(&self) -> bool {
+        false
+    }
     fn on_build_started(&mut self, _stream: &SymbolStream) {}
     fn on_window_size_started(&mut self, _window_bit_length: u32, _stream: &SymbolStream) {}
     fn on_pass_started(&mut self, _event: &PassStarted, _stream: &SymbolStream) {}

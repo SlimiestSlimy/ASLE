@@ -68,6 +68,16 @@ impl<'a> BitReader<'a> {
         bit as u64
     }
 
+    /// Bits read so far.
+    pub fn bits_read(&self) -> u64 {
+        self.bit_position as u64
+    }
+
+    /// Puts back the last `bit_count` bits read: they will be read again.
+    pub fn move_back(&mut self, bit_count: u64) {
+        self.bit_position -= bit_count as usize;
+    }
+
     pub fn read_bits(&mut self, bit_count: u32) -> u64 {
         let mut value = 0;
         for _ in 0..bit_count {

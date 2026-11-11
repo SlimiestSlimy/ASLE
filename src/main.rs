@@ -11,6 +11,7 @@ mod container_format;
 mod fast_hash;
 mod huffman_tree;
 mod json_lines_log;
+mod leaf_counts_by_weight;
 mod merge_candidates;
 mod multiset_permutation;
 mod option_ranking;
@@ -46,6 +47,9 @@ struct CommandLineObserver {
 }
 
 impl BuilderObserver for CommandLineObserver {
+    fn wants_code_lengths_after(&self) -> bool {
+        self.json_lines_log.is_some()
+    }
     fn on_build_started(&mut self, stream: &SymbolStream) {
         if let Some(log) = self.json_lines_log.as_mut() {
             log.on_build_started(stream);

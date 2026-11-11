@@ -1,6 +1,6 @@
 //! Decision: the bottom-up loop that builds the symbol dictionary.
 //!
-//! For each window size 2..=n, passes repeat until a pass commits nothing (or
+//! For each window size 2, 3, 5, 8, 13, ... (Fibonacci, up to n), passes repeat until a pass commits nothing (or
 //! an exact state repeats). A pass finds the merge candidates once, then runs
 //! rounds. Each round, against the current state:
 //! 0. A leaf placed only once is removed automatically, respelled with other
@@ -35,21 +35,36 @@
 
 use crate::builder_events::*;
 use crate::change_prediction::{
-    calculate_encoded_symbol_bits_and_code_lengths, find_non_saving_leaves, list_leaves_removed_and_added,
+    code_bits_after_changes, find_non_saving_leaves, list_leaves_removed_and_added,
     predict_leaf_removal, predict_merge,
 };
 use crate::merge_candidates::{find_merge_candidates, select_most_non_overlapping_occurrences, MergeCandidate};
 use crate::option_ranking::{calculate_score_numerator, compare_by_rank};
-use crate::predicted_changes::{LeafRemovalPrediction, MergePrediction};
-use crate::symbol_stream::{count_leaves, SymbolStream};
+use crate::leaf_counts_by_weight::LeafCountsByWeight;
+use crate::predicted_changes::{frequency_after_changes, LeafRemovalPrediction, MergePrediction};
+use crate::symbol_stream::SymbolStream;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Instant;
 
+/// Window sizes follow the Fibonacci sequence, 2, 3, 5, 8, 13, 21, ..., up to
+/// the largest one not above n (the user's design, 2026-11-11): far fewer
+/// window sizes, and each is the sum of the two before it, so one symbol of
+/// each of the two previous sizes fills a window exactly.
+fn fibonacci_window_sizes(maximum_symbol_bit_length: u32) -> Vec<u32> {
+    let mut window_sizes = Vec::new();
+    let (mut current, mut next) = (2u32, 3u32);
+    while current <= maximum_symbol_bit_length {
+        window_sizes.push(current);
+        (current, next) = (next, current + next);
+    }
+    window_sizes
+}
+
 pub fn build_symbol_dictionary(stream: &mut SymbolStream, observer: &mut dyn BuilderObserver) {
     let build_start = Instant::now();
     observer.on_build_started(stream);
-    for window_bit_length in 2..=stream.maximum_symbol_bit_length {
+    for window_bit_length in fibonacci_window_sizes(stream.maximum_symbol_bit_length) {
         observer.on_window_size_started(window_bit_length, stream);
         let summary = run_window_size(stream, window_bit_length, observer);
         observer.on_window_size_finished(&summary, stream);
@@ -126,8 +141,10 @@ fn run_pass(
     let mut round_number = 0;
     loop {
         round_number += 1;
-        let (encoded_symbol_bits_before, code_lengths_before) =
-            calculate_encoded_symbol_bits_and_code_lengths(&stream.symbol_frequencies);
+        let encoded_symbol_bits_before = stream.encoded_symbol_bits();
+        let code_lengths_before = stream.code_lengths_by_symbol_id();
+        // Candidates are tried on this copy of the up-to-date leaf counts, refreshed before each.
+        let mut working_leaf_counts = stream.leaf_counts_by_weight().clone();
         let context = RoundContext {
             window_bit_length,
             pass_number: summary.passes,
@@ -136,14 +153,14 @@ fn run_pass(
             code_lengths_before,
             leaves_before: stream.leaf_count(),
         };
-        if let Some(removal) = find_single_placement_leaf_to_remove(stream, &context) {
+        if let Some(removal) = find_single_placement_leaf_to_remove(stream, &mut working_leaf_counts, &context) {
             report_and_apply_leaf_removal(stream, removal, &context, 0, true, observer);
             summary.leaves_removed += 1;
             summary.single_placement_leaves_removed += 1;
             // Positions changed; the candidates are stale. The next pass rescans.
             return changes_committed + 1;
         }
-        let mut removal_scan = find_leaf_to_remove(stream, &context);
+        let mut removal_scan = find_leaf_to_remove(stream, &mut working_leaf_counts, &context);
         if let Some(removal) = removal_scan.removal.take() {
             report_and_apply_leaf_removal(stream, removal, &context, removal_scan.non_saving_leaves, false, observer);
             summary.leaves_removed += 1;
@@ -152,6 +169,7 @@ fn run_pass(
         }
         let ranked_merges = predict_and_rank_merges(
             stream,
+            &mut working_leaf_counts,
             &merge_candidates,
             &context,
             &removal_scan,
@@ -206,18 +224,26 @@ fn leaf_removal_lowers_encoded_symbol_bits(removal: &LeafRemovalPrediction, cont
 
 /// Analysis + decision: the first leaf placed only once (lowest symbol id)
 /// that can be respelled with other live leaves.
-fn find_single_placement_leaf_to_remove(stream: &SymbolStream, context: &RoundContext) -> Option<LeafRemovalPrediction> {
+fn find_single_placement_leaf_to_remove(
+    stream: &SymbolStream,
+    working_leaf_counts: &mut LeafCountsByWeight,
+    context: &RoundContext,
+) -> Option<LeafRemovalPrediction> {
     stream
         .symbol_frequencies
         .iter()
         .enumerate()
         .filter(|&(_, &frequency)| frequency == 1)
-        .find_map(|(symbol_id, _)| predict_leaf_removal(stream, symbol_id, &context.code_lengths_before))
+        .find_map(|(symbol_id, _)| predict_leaf_removal(stream, working_leaf_counts, symbol_id, &context.code_lengths_before))
 }
 
 /// Analysis + decision: the first non-saving leaf (biggest loss first) that
 /// can be respelled and is worth removing.
-fn find_leaf_to_remove(stream: &SymbolStream, context: &RoundContext) -> LeafRemovalScan {
+fn find_leaf_to_remove(
+    stream: &SymbolStream,
+    working_leaf_counts: &mut LeafCountsByWeight,
+    context: &RoundContext,
+) -> LeafRemovalScan {
     let non_saving_leaf_ids = find_non_saving_leaves(stream, &context.code_lengths_before);
     let mut scan = LeafRemovalScan {
         non_saving_leaves: non_saving_leaf_ids.len(),
@@ -226,7 +252,7 @@ fn find_leaf_to_remove(stream: &SymbolStream, context: &RoundContext) -> LeafRem
         best_removal_not_lowering: None,
     };
     for symbol_id in non_saving_leaf_ids {
-        match predict_leaf_removal(stream, symbol_id, &context.code_lengths_before) {
+        match predict_leaf_removal(stream, working_leaf_counts, symbol_id, &context.code_lengths_before) {
             None => scan.non_saving_leaves_unspellable += 1,
             Some(removal) => {
                 if leaf_removal_lowers_encoded_symbol_bits(&removal, context) {
@@ -265,7 +291,11 @@ fn report_and_apply_leaf_removal(
         removed_code_length_before: context.code_lengths_before[removal.removed_symbol_id],
         removed_code_bits_before: removal.removed_code_bits_before,
         replacement_symbol_ids: removal.replacement_symbol_ids.clone(),
-        replacement_code_bits_after: removal.replacement_code_bits_after,
+        replacement_code_bits_after: if observer.wants_code_lengths_after() {
+            code_bits_after_changes(stream, &removal.frequency_changes, &removal.replacement_symbol_ids, removal.removed_frequency)
+        } else {
+            0
+        },
         encoded_symbol_bits_before: context.encoded_symbol_bits_before,
         encoded_symbol_bits_after: removal.encoded_symbol_bits_after,
         leaves_before: context.leaves_before,
@@ -281,6 +311,7 @@ fn report_and_apply_leaf_removal(
 /// and the merges come back ranked best first.
 fn predict_and_rank_merges(
     stream: &SymbolStream,
+    working_leaf_counts: &mut LeafCountsByWeight,
     merge_candidates: &[MergeCandidate],
     context: &RoundContext,
     removal_scan: &LeafRemovalScan,
@@ -312,9 +343,9 @@ fn predict_and_rank_merges(
             continue;
         }
         let merge =
-            predict_merge(stream, candidate_index, candidate.definition, occurrence_ranges, &context.code_lengths_before);
+            predict_merge(stream, working_leaf_counts, candidate_index, candidate.definition, occurrence_ranges, &context.code_lengths_before);
         round.merges_that_lower_the_leaf_count +=
-            (count_leaves(&merge.symbol_frequencies_after) < context.leaves_before) as u64;
+            (merge.leaves_after < context.leaves_before) as u64;
         merges.push(merge);
     }
     merges.sort_by(|first, second| {
@@ -351,10 +382,10 @@ enum ForcedChoice {
 /// ties: fewer leaves after, then the removal, then merge rank order.
 fn choose_forced_change(ranked_merges: &[MergePrediction], removal_scan: &LeafRemovalScan) -> Option<ForcedChoice> {
     let mut best: Option<(u64, usize, ForcedChoice)> = removal_scan.best_removal_not_lowering.as_ref().map(|removal| {
-        (removal.encoded_symbol_bits_after, count_leaves(&removal.symbol_frequencies_after), ForcedChoice::LeafRemoval)
+        (removal.encoded_symbol_bits_after, removal.leaves_after, ForcedChoice::LeafRemoval)
     });
     for (rank_position, merge) in ranked_merges.iter().enumerate() {
-        let key = (merge.encoded_symbol_bits_after, count_leaves(&merge.symbol_frequencies_after));
+        let key = (merge.encoded_symbol_bits_after, merge.leaves_after);
         let better = match &best {
             None => true,
             Some((best_bits, best_leaves, _)) => key.cmp(&(*best_bits, *best_leaves)) == Ordering::Less,
@@ -412,7 +443,7 @@ fn commit_best_merge(
                 merged_definition: merge.merged_definition,
                 frequency: merge.merged_occurrence_ranges.len(),
                 reason: RejectionReason::EncodedSymbolBitsDoNotDrop,
-                merged_code_bits_after: merge.merged_code_bits_after,
+                merged_code_bits_after: merged_code_bits_after(stream, merge, observer.wants_code_lengths_after()),
                 consumed_code_bits_before: merge.consumed_code_bits_before,
             };
             observer.on_merge_rejected(&rejected, stream);
@@ -426,10 +457,21 @@ fn commit_best_merge(
     if !merge_lowers_encoded_symbol_bits(merge, context) {
         summary.merge_committed_without_lowering_the_total = true;
     }
-    let committed = describe_merge_before_applying(stream, merge, context, chosen_rank_position);
+    let committed =
+        describe_merge_before_applying(stream, merge, context, chosen_rank_position, observer.wants_code_lengths_after());
     stream.apply_merge(merge, position_consumed_this_pass);
     observer.on_change_committed(&committed, stream);
     RoundOutcome::MergeCommitted
+}
+
+/// Occurrences * the merged symbol's code length after the merge; for the log
+/// only, so 0 unless the observer asks (see BuilderObserver).
+fn merged_code_bits_after(stream: &SymbolStream, merge: &MergePrediction, wanted: bool) -> u64 {
+    if !wanted {
+        return 0;
+    }
+    let occurrences = merge.merged_occurrence_ranges.len() as u64;
+    code_bits_after_changes(stream, &merge.frequency_changes, &[merge.merged_symbol_id as u32], occurrences)
 }
 
 /// Builds the full record of a merge from the state before it is applied.
@@ -438,6 +480,7 @@ fn describe_merge_before_applying(
     merge: &MergePrediction,
     context: &RoundContext,
     rank_position: usize,
+    wants_code_lengths_after: bool,
 ) -> ChangeCommitted {
     let mut consumed_parts: Vec<ConsumedPart> = Vec::new();
     for &(start_position, end_position) in &merge.merged_occurrence_ranges {
@@ -448,13 +491,17 @@ fn describe_merge_before_applying(
                 None => consumed_parts.push(ConsumedPart {
                     symbol_id: consumed_symbol_id,
                     consumed_count: 1,
-                    frequency_after_merge: merge.symbol_frequencies_after[consumed_symbol_id],
+                    frequency_after_merge: frequency_after_changes(
+                        &merge.frequency_changes,
+                        consumed_symbol_id,
+                        stream.symbol_frequencies[consumed_symbol_id],
+                    ),
                 }),
             }
         }
     }
     let (removed_leaf_ids, added_leaf_ids) =
-        list_leaves_removed_and_added(&stream.symbol_frequencies, &merge.symbol_frequencies_after);
+        list_leaves_removed_and_added(&stream.symbol_frequencies, &merge.frequency_changes);
     ChangeCommitted {
         window_bit_length: context.window_bit_length,
         pass_number: context.pass_number,
@@ -470,7 +517,7 @@ fn describe_merge_before_applying(
         lowered_the_total: merge.encoded_symbol_bits_after < context.encoded_symbol_bits_before,
         frequency: merge.merged_occurrence_ranges.len(),
         consumed_parts,
-        merged_code_bits_after: merge.merged_code_bits_after,
+        merged_code_bits_after: merged_code_bits_after(stream, merge, wants_code_lengths_after),
         consumed_code_bits_before: merge.consumed_code_bits_before,
         score_numerator: calculate_score_numerator(context.encoded_symbol_bits_before, &merge.ranking_key()),
         encoded_symbol_bits_before: context.encoded_symbol_bits_before,

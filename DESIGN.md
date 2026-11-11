@@ -19,7 +19,8 @@ boundaries.
 |---|---|
 | bit stream | the input, read as bits, most significant bit of each byte first |
 | n, maximum symbol bit length | the largest window size, so the longest possible symbol; the only parameter; no built-in limit |
-| window size, L | the exact bit length being merged into at the current stage, 2..=n |
+| window size, L | the exact bit length being merged into at the current stage: 2, 3, 5, 8, 13, ... (Fibonacci) up to n |
+| leaf counts by weight | how many leaves have each frequency, as sorted runs (weight, count); all the builder's hot path needs for the exact encoded symbol bits |
 | shared bit sequence | one packed sequence of bits that every symbol points into: the input bits (plus one `0` and one `1`) in the encoder, the decoded symbol bits in the decoder |
 | symbol definition | a slice of the shared bit sequence: (first bit offset, bit length); equal bits = same symbol |
 | placed symbol | one position in the stream's current parse; the parse always spells the input exactly |
@@ -41,13 +42,18 @@ boundaries.
 | code tree node | a place in the canonical Huffman code tree: (depth, code bits on the way to it); each node is one binary choice in the body |
 | order-3 context | the depth-first positions of the last 3 placed symbols |
 | last choice | the side (0 or 1) last taken at a (context, code tree node); one bit of memory, the same in encoder and decoder |
+| success rate | how often the remembered side has been the one taken, over the whole body: the remembered side's probability |
 
 ---
 
 ## Current rules, with the reason for each
 
 1. **Start state.** Every input bit is a placed `0` or `1`. Window sizes start at 2,
-   because 1-bit symbols never get a Huffman code shorter than 1 bit.
+   because 1-bit symbols never get a Huffman code shorter than 1 bit, and follow the
+   Fibonacci sequence, 2, 3, 5, 8, 13, 21, ..., up to the largest not above n (the user's
+   design, 2026-11-11): each is the sum of the two before it, so one symbol of each fills
+   a window exactly. *Why:* every size 2..=n took 3–7× longer and 4–19% more bits
+   (measured below).
 2. **Candidates.** Exactly fill the window with 2+ placed symbols; any mix of raw bits
    and earlier symbols. A placed symbol is never split.
 3. **Occurrences.** The most non-overlapping occurrences, taken left to right. All
@@ -79,6 +85,29 @@ boundaries.
 10. **Stopping.** A window size ends when a pass commits nothing, or when an exact state
    (all frequencies) repeats (a removal puts placements back, so merges and removals
    could undo each other).
+
+## How the builder computes totals (the user's designs, 2026-11-11)
+
+The decisions need only the total encoded symbol bits after a candidate, the leaf count
+after it, and once per round the code lengths before it (respelling, the non-saving
+check). The tree is for encoding, not for hot lookups:
+
+- **Leaf counts by weight.** The stream keeps how many leaves have each frequency, as runs
+  (weight, count) sorted lightest first, in step with the frequencies. Each candidate is a
+  list of frequency changes (symbol, delta); a working copy of the counts is refreshed from
+  the stream's before every candidate, the changes applied, the total read.
+- **Two-queue Huffman total.** With the weights sorted, merged nodes come out lightest
+  first too, so two queues replace the heap. A run of equal weights pairs up a whole run at
+  a time, so the work grows with the number of distinct weights, not leaves. Tested equal
+  to a heap build on 20,000 random tables.
+- **Two-queue code lengths.** Once per round (and for the container): leaves sorted by
+  (frequency, symbol id), merged nodes first-in first-out, the leaf taken on equal
+  weights: exactly the heap build keyed by (weight, node id), so the code lengths are the
+  same (tested on 20,000 tables).
+
+*Replaced:* a full heap rebuild per candidate; then two explicit dynamic Huffman trees (an
+up-to-date one and a working copy, sibling-property moves); restarting the candidate list
+after every commit (20–30% slower, no gain).
 
 ## Container format
 
@@ -129,20 +158,75 @@ Huffman's; the multiset permutation won on every test file (binary −3,182 bits
 
 Each placed symbol's canonical code is coded one bit at a time, each bit being the choice
 at one code tree node. The prediction for a node comes from the **last choice** taken at
-the same (order-3 context, code tree node): the remembered side gets 7/8, the other 1/8;
-a pair never seen gets 1/2 (the Huffman tree's own split). After each bit the last choice
-is overwritten. Encoder and decoder hold the same memory, so nothing is stored for it.
+the same (order-3 context, code tree node). A pair never seen gets 1/2 (the Huffman
+tree's own split). Otherwise the remembered side gets the body's **success rate** so far
+(the user's design, 2026-11-11, replacing a fixed 7/8): one global pair of counters,
+remembered side taken / other side taken, over every node that had a remembered side.
+The counters learn with the dimensional tiler's local decay: +256 to the outcome's
+counter, then each counter loses r · right · wrong / (right + wrong)², rounded down. The
+rate is kept within [2, 2^32 − 2] / 2^32 so the coder can split it (MINE). After each bit
+the last choice is overwritten. Encoder and decoder hold the same memory, so nothing is stored for it.
 Before the first 3 symbols a start marker stands in for the missing positions (MINE).
 
-The coder is an LZMA-style binary range coder, integers only: a 64-bit low end, a 32-bit
-range, carries through a cached byte. A probability is a u32 fraction of 2^32; the split
-is (range × probability) >> 32 in 64 bits. Its first output byte, always 0, is not
-written (MINE); the flush writes 4 more bytes, so the body ends on a byte and tiny inputs
-pay about 32 bits (5 input bits: a 7-byte stream). The decoder reads zeros past the end.
+The coder is a binary range coder, integers only, that outputs **single bits** (the
+user's design, 2026-11-11): a bit leaves the coder only when the range falls below 2^31,
+so the body is precision shaped, never symbol or byte shaped. The low end is a 32-bit
+window; a carry out of it is added straight into the bits already out, kept in memory
+until the end (MINE). A probability is a u32 fraction of 2^32; the split is
+(range × probability) >> 32 in 64 bits.
+
+**The end** (the user's design, 2026-11-11): after the last decision the encoder writes the
+fewest bits (at most 2) that put the number inside the final range whatever follows them.
+The decoder knows the symbol count, so it stops after the last symbol by itself, works out
+the same final bits from its own copy of the low end, and leaves its reader right after
+them. No length, no end marker: anything can follow the body. Decompression checks that
+the body ends in the file's last byte. Cost against the earlier ending (shortest value
+followed by zeros, trailing zeros dropped, so the body had to be last): +1 to +7 bits a file.
+
+*Replaced:* an LZMA-style coder (32-bit range, output by bytes through a cached byte,
+first byte 0 left out, a 4-byte flush). Measured with the instrumented body: its bits
+were the ideal cost of its probabilities plus 24–32 bits per body, all from the flush
+and the byte ending.
 
 ---
 
 ## Measured history (bytes)
+
+### Speed (compression_testbench asle_performance.py; Ryzen 5 5600, one pinned core, median of 3)
+
+Totals over 5 files (ELF /usr/bin/ls, packed 5-bit fields, Rust source, GPL-3 text, vim
+manual), each cut to the size given; every stream decoded back exactly; random bytes are
+a noise reference, never counted.
+
+| Builder, n = 16, 16 KiB each | seconds | |
+|---|---|---|
+| heap rebuild per candidate (5ea596b) | 18.2 | |
+| two dynamic trees (not kept) | 3.13 | |
+| leaf counts by weight, two-queue total | 1.573 | bits identical to the heap |
+| + two-queue code lengths | 1.510 | |
+| + Fibonacci window sizes | 0.296 | 7% fewer bits |
+
+| Window sizes, against every size 2..=n | n = 16, 16 KiB | n = 64, 16 KiB | n = 256, 4 KiB | n = 1024, 4 KiB |
+|---|---|---|---|---|
+| even sizes only | 0.90–0.95× time, 1.02–1.06× bits | | | |
+| **Fibonacci (kept)** | 0.20× time, 0.93× bits | 0.19×, 0.90× | 0.29×, 0.82× | 0.15×, 0.81× |
+| squaring strides (2, 4; 8, 12, 16; 32, 48, ..., 256; ...) | 0.69×, 1.03× | 0.52×, 1.03× | 0.50×, 0.92× | 0.24×, 0.91× |
+
+(The squaring row is measured against Fibonacci and converted: 1.7–3.6× slower than
+Fibonacci, 6–14% more bits.)
+
+### Body model and coder (Fibonacci builder; 5 files as above; random apart)
+
+| Body | n = 16, 16 KiB | n = 1024, 16 KiB | random, 16 KiB |
+|---|---|---|---|
+| last choice 7/8, byte coder | 351,016 | 426,728 | 199,896 |
+| success rate, local decay | 335,128 (−4.5%) | 415,696 (−2.6%) | 152,416 |
+| + bit by bit output, trailing zeros dropped | −17 to −24 bits a file | | |
+| + ending itself (no length; current) | +1 to +7 bits a file | | |
+
+Per file at n = 16: packed fields −15%, ELF −1.7%, Rust −1.4%, vim −0.6%, GPL-3 +1.8%.
+The coder's bits are the ideal cost of its probabilities plus a few bits a body (measured
+with an instrumented copy: −log2 of every probability used, summed).
 
 ### Range-coded body (n = 16; whole stream in **bits**, lower is better; random is a noise reference, not counted)
 
@@ -269,13 +353,16 @@ manual) is in the test set for larger runs.
 
 - What should stop the builder from adding symbols the header has to pay for, without
   measuring the header?
-- Building time grows quickly with input size: every round re-predicts every candidate
-  with a full Huffman rebuild (the 643 KB vim manual took ~2.5 min per window size by 17).
-  Callgrind (current builder, early builder source 8 KB, n = 16, 7.30 billion
-  instructions): 99.3% in the builder, 90.7% in full Huffman rebuilds
-  (`calculate_code_lengths`), 59.4% in its heap's pop alone; 56.8% called from leaf
-  removal predictions, 37.8% from merge predictions. Not yet profiled: the builder
-  before the forced pool, so the cost of the new rules is unknown.
+- Speed toward n = 64–1024 (no multithreading yet): the last profile (leaf counts, n = 64)
+  spent 34% in the per-candidate two-queue total, 7% in find_symbol_id, 5% in finding
+  merge candidates.
+- The body's success counters: one global pair now; per depth, or per (context, node)
+  next to the last choice? The text files lost about 1% to the single rate.
+- The counters' cold start: after the first outcome the pair (256, 0) means 100%, held at
+  the limit; a miss there costs about 31 bits (0–6 times a file). Start at one step each
+  way?
+- Packed 5-bit fields lose with Fibonacci sizes through the body, not the builder: the
+  2-bit `00` is 59% of the placements, and its contexts repeat.
 
 ---
 
@@ -289,8 +376,8 @@ manual) is in the test set for larger runs.
 | `symbol_prefix_tree` | describes, measures, writes and reads the symbol set |
 | `code_length_section` | writes and reads which code length each symbol has |
 | `canonical_huffman_code` | canonical codes from code lengths, and which symbol a code is |
-| `range_coded_body` | the body: code tree choices predicted by the last choice per (context, node) |
-| `binary_range_coder` | integer binary range coder, u32 probabilities |
+| `range_coded_body` | the body: code tree choices predicted by the last choice per (context, node), priced by the success rate |
+| `binary_range_coder` | integer binary range coder, u32 probabilities, bit by bit output, ends itself |
 | `multiset_permutation` | exact ranking and unranking of multiset permutations |
 | `big_unsigned_integer` | big integers for the combination and permutation indexes |
 | `symbol_builder` | decision loop: window sizes, passes, rounds, commit rules |
@@ -299,7 +386,8 @@ manual) is in the test set for larger runs.
 | `change_prediction`, `merge_candidates` | analysis: read-only predictions |
 | `symbol_stream` | the parse state; the only code that changes it |
 | `predicted_changes` | plain data for predictions |
-| `huffman_tree` | Huffman code lengths and encoded symbol bits for decisions |
+| `leaf_counts_by_weight` | leaves per frequency; the exact total (two queues) for every candidate |
+| `huffman_tree` | Huffman code lengths (two queues), once per round and for the container |
 | `packed_bit_sequence`, `symbol_definition`, `bit_io`, `fast_hash` | building blocks |
 
 ## Running

@@ -9,9 +9,10 @@
 //! state. Everything else reads it.
 
 use crate::fast_hash::FastHashMap;
-use crate::huffman_tree::calculate_encoded_symbol_bits;
+use crate::huffman_tree::calculate_code_lengths;
+use crate::leaf_counts_by_weight::LeafCountsByWeight;
 use crate::packed_bit_sequence::PackedBitSequence;
-use crate::predicted_changes::{LeafRemovalPrediction, MergePrediction};
+use crate::predicted_changes::{FrequencyChange, LeafRemovalPrediction, MergePrediction};
 use crate::symbol_definition::SymbolDefinition;
 
 /// Marks a position whose symbol was absorbed into a merge earlier in the
@@ -23,6 +24,10 @@ pub struct SymbolStream {
     pub shared_bit_sequence: PackedBitSequence,
     pub symbol_definitions: Vec<SymbolDefinition>,
     pub symbol_frequencies: Vec<u64>,
+    /// How many leaves have each frequency, changed only together with
+    /// `symbol_frequencies` (apply_frequency_changes); the builder tries
+    /// candidates on working copies of it.
+    leaf_counts_by_weight: LeafCountsByWeight,
     /// The input spelled as placed symbols, in order; their bits are
     /// consecutive input bits, so a position's input offset is the sum of the
     /// bit lengths before it.
@@ -57,6 +62,7 @@ impl SymbolStream {
             shared_bit_sequence,
             symbol_definitions: Vec::new(),
             symbol_frequencies: Vec::new(),
+            leaf_counts_by_weight: LeafCountsByWeight::default(),
             placed_symbol_ids,
             maximum_symbol_bit_length,
             input_bit_count,
@@ -65,6 +71,7 @@ impl SymbolStream {
         stream.add_symbol_definition(SymbolDefinition { first_bit_offset: input_bit_count, bit_length: 1 });
         stream.add_symbol_definition(SymbolDefinition { first_bit_offset: input_bit_count + 1, bit_length: 1 });
         stream.symbol_frequencies = vec![zero_count, one_count];
+        stream.leaf_counts_by_weight = LeafCountsByWeight::from_symbol_frequencies(&stream.symbol_frequencies);
         stream
     }
 
@@ -94,7 +101,31 @@ impl SymbolStream {
 
     /// Exact bits the encoded symbols take up: sum of frequency * code length.
     pub fn encoded_symbol_bits(&self) -> u64 {
-        calculate_encoded_symbol_bits(&self.symbol_frequencies)
+        self.leaf_counts_by_weight.encoded_symbol_bits()
+    }
+
+    /// The up-to-date leaf counts by weight (read only; they change with the frequencies).
+    pub fn leaf_counts_by_weight(&self) -> &LeafCountsByWeight {
+        &self.leaf_counts_by_weight
+    }
+
+    /// Every symbol's Huffman code length, by symbol id (a heap build).
+    pub fn code_lengths_by_symbol_id(&self) -> Vec<u32> {
+        let mut code_lengths = calculate_code_lengths(&self.symbol_frequencies);
+        code_lengths.resize(self.symbol_definitions.len(), 0);
+        code_lengths
+    }
+
+    /// The frequency table and the leaf counts change together, here only.
+    fn apply_frequency_changes(&mut self, changes: &[FrequencyChange]) {
+        self.leaf_counts_by_weight.apply_frequency_changes(changes, &self.symbol_frequencies);
+        for change in changes {
+            let symbol_id = change.symbol_id as usize;
+            if self.symbol_frequencies.len() <= symbol_id {
+                self.symbol_frequencies.resize(symbol_id + 1, 0);
+            }
+            self.symbol_frequencies[symbol_id] = (self.symbol_frequencies[symbol_id] as i64 + change.delta) as u64;
+        }
     }
 
     /// Any symbol ever defined with the same bits, alive (leaf) or dead
@@ -126,7 +157,7 @@ impl SymbolStream {
         if merge.merged_symbol_id == self.symbol_definitions.len() {
             self.add_symbol_definition(merge.merged_definition);
         }
-        self.symbol_frequencies = merge.symbol_frequencies_after.clone();
+        self.apply_frequency_changes(&merge.frequency_changes);
         for &(start_position, end_position) in &merge.merged_occurrence_ranges {
             self.placed_symbol_ids[start_position as usize] = merge.merged_symbol_id as u32;
             position_consumed_this_pass[start_position as usize] = true;
@@ -140,7 +171,7 @@ impl SymbolStream {
     /// Replaces every placement of the removed leaf with its respelling and
     /// drops vacated positions. Positions change, so the pass must end.
     pub fn apply_leaf_removal(&mut self, removal: &LeafRemovalPrediction) {
-        self.symbol_frequencies = removal.symbol_frequencies_after.clone();
+        self.apply_frequency_changes(&removal.frequency_changes);
         let mut rebuilt_symbol_ids = Vec::with_capacity(self.placed_symbol_ids.len());
         for &symbol_id in &self.placed_symbol_ids {
             if symbol_id == VACATED_POSITION {
