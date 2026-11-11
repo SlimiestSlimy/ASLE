@@ -9,6 +9,7 @@ mod huffman_tree;
 mod json_lines_log;
 mod merge_candidates;
 mod option_ranking;
+mod packed_bit_sequence;
 mod predicted_changes;
 mod symbol_builder;
 mod symbol_definition;
@@ -124,7 +125,7 @@ fn print_report(
     let mut leaves_by_bit_length = std::collections::BTreeMap::new();
     let mut leaves_by_frequency_band = std::collections::BTreeMap::new();
     for entry in &report.dictionary {
-        *leaves_by_bit_length.entry(entry.definition.bit_length).or_insert(0u32) += 1;
+        *leaves_by_bit_length.entry(entry.bit_length).or_insert(0u32) += 1;
         *leaves_by_frequency_band.entry(64 - entry.frequency.leading_zeros()).or_insert(0u32) += 1;
     }
     let lengths: Vec<String> = leaves_by_bit_length.iter().map(|(bits, count)| format!("{bits}b:{count}")).collect();
@@ -142,7 +143,7 @@ fn print_report(
         for entry in report.dictionary.iter().take(16) {
             println!(
                 "    {:>20}  frequency={:<8} code_length={}",
-                entry.definition.as_bit_string(),
+                entry.bit_string,
                 entry.frequency,
                 entry.code_length
             );

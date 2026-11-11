@@ -19,7 +19,6 @@ use crate::change_prediction::{
 use crate::merge_candidates::{find_merge_candidates, select_most_non_overlapping_occurrences, MergeCandidate};
 use crate::option_ranking::{calculate_score_numerator, compare_by_rank};
 use crate::predicted_changes::MergePrediction;
-use crate::symbol_definition::SymbolDefinition;
 use crate::symbol_stream::{count_leaves, SymbolStream};
 use std::time::Instant;
 
@@ -156,14 +155,19 @@ fn predict_and_rank_merges(
             round.candidates_dropped_for_single_occurrence += 1;
             continue;
         }
-        let merged_definition = SymbolDefinition { bits: candidate.bits, bit_length: context.window_bit_length };
-        let merge = predict_merge(stream, candidate_index, merged_definition, occurrence_ranges, &context.code_lengths_before);
+        let merge =
+            predict_merge(stream, candidate_index, candidate.definition, occurrence_ranges, &context.code_lengths_before);
         round.merges_that_lower_the_leaf_count +=
             (count_leaves(&merge.symbol_frequencies_after) < context.leaves_before) as u64;
         merges.push(merge);
     }
     merges.sort_by(|first, second| {
-        compare_by_rank(context.encoded_symbol_bits_before, &first.ranking_key(), &second.ranking_key())
+        compare_by_rank(
+            context.encoded_symbol_bits_before,
+            &first.ranking_key(),
+            &second.ranking_key(),
+            &stream.shared_bit_sequence,
+        )
     });
     round.merges_ranked = merges.len();
     observer.on_round_analyzed(&round, stream);

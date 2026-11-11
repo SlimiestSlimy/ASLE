@@ -12,6 +12,7 @@
 use crate::bit_io::{BitReader, BitWriter};
 use crate::builder_events::BuilderObserver;
 use crate::huffman_tree::HuffmanTree;
+use crate::packed_bit_sequence::PackedBitSequence;
 use crate::symbol_builder::build_symbol_dictionary;
 use crate::symbol_definition::SymbolDefinition;
 use crate::symbol_stream::SymbolStream;
@@ -66,7 +67,8 @@ pub fn measure_header_bit_count(stream: &SymbolStream) -> u64 {
 }
 
 pub struct DictionaryEntry {
-    pub definition: SymbolDefinition,
+    pub bit_string: String,
+    pub bit_length: u32,
     pub frequency: u64,
     pub code_length: u32,
 }
@@ -115,10 +117,13 @@ pub fn compress_input(
     let huffman_tree = HuffmanTree::build_from_frequencies(&stream.symbol_frequencies);
     let codes_by_symbol_id = huffman_tree.calculate_codes_by_symbol_id(stream.symbol_definitions.len());
     let symbol_definitions = &stream.symbol_definitions;
+    let shared_bit_sequence = &stream.shared_bit_sequence;
     huffman_tree.write_depth_first(&mut bit_writer, &mut |bit_writer: &mut BitWriter, symbol_id: usize| {
         let definition = symbol_definitions[symbol_id];
         bit_writer.write_bits(size_table_index_by_bit_length[definition.bit_length as usize], size_index_bits);
-        bit_writer.write_bits(definition.bits, definition.bit_length);
+        shared_bit_sequence.for_each_chunk(definition.first_bit_offset, definition.bit_length as u64, |chunk, count| {
+            bit_writer.write_bits(chunk, count)
+        });
     });
     let header_bit_count = bit_writer.bits_written;
     assert_eq!(header_bit_count, measure_header_bit_count(&stream), "header measurement and writer disagree");
@@ -132,12 +137,16 @@ pub fn compress_input(
     let mut dictionary: Vec<DictionaryEntry> = (0..stream.symbol_definitions.len())
         .filter(|&symbol_id| stream.symbol_frequencies[symbol_id] > 0)
         .map(|symbol_id| DictionaryEntry {
-            definition: stream.symbol_definitions[symbol_id],
+            bit_string: stream.symbol_as_bit_string(symbol_id),
+            bit_length: stream.symbol_definitions[symbol_id].bit_length,
             frequency: stream.symbol_frequencies[symbol_id],
             code_length: codes_by_symbol_id[symbol_id].1,
         })
         .collect();
-    dictionary.sort_by_key(|entry| (std::cmp::Reverse(entry.frequency), entry.definition.bit_length, entry.definition.bits));
+    dictionary.sort_by(|first, second| {
+        (std::cmp::Reverse(first.frequency), first.bit_length, &first.bit_string)
+            .cmp(&(std::cmp::Reverse(second.frequency), second.bit_length, &second.bit_string))
+    });
     let report = CompressionReport {
         dictionary,
         header_bit_count,
@@ -157,17 +166,27 @@ pub fn decompress_container(container_bytes: &[u8]) -> Vec<u8> {
     let maximum_symbol_bit_length = bit_reader.read_elias_gamma() as u32;
     let size_table: Vec<u32> = (1..=maximum_symbol_bit_length).filter(|_| bit_reader.read_bit() == 1).collect();
     let size_index_bits = bits_to_index_table(size_table.len());
+    // The decoder's shared bit sequence: every symbol's bits, appended as read.
+    let mut decoded_symbol_bits = PackedBitSequence::new();
     let mut symbol_definitions: Vec<SymbolDefinition> = Vec::new();
     let huffman_tree = HuffmanTree::read_depth_first(&mut bit_reader, &mut |bit_reader: &mut BitReader| {
         let bit_length = size_table[bit_reader.read_bits(size_index_bits) as usize];
-        let bits = bit_reader.read_bits(bit_length);
-        symbol_definitions.push(SymbolDefinition { bits, bit_length });
+        let first_bit_offset = decoded_symbol_bits.bit_count();
+        let mut remaining = bit_length;
+        while remaining > 0 {
+            let chunk_bit_count = remaining.min(64);
+            decoded_symbol_bits.push_bits(bit_reader.read_bits(chunk_bit_count), chunk_bit_count);
+            remaining -= chunk_bit_count;
+        }
+        symbol_definitions.push(SymbolDefinition { first_bit_offset, bit_length });
         symbol_definitions.len() - 1
     });
     let mut output_writer = BitWriter::new();
     while output_writer.bits_written < input_bit_count {
         let definition = symbol_definitions[huffman_tree.decode_next_symbol_id(&mut bit_reader)];
-        output_writer.write_bits(definition.bits, definition.bit_length);
+        decoded_symbol_bits.for_each_chunk(definition.first_bit_offset, definition.bit_length as u64, |chunk, count| {
+            output_writer.write_bits(chunk, count)
+        });
     }
     output_writer.into_bytes()
 }

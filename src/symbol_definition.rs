@@ -1,14 +1,9 @@
-//! What a symbol is: a specific bit string of a specific length.
+//! What a symbol is: a slice of the shared bit sequence. Two definitions with
+//! equal bits (compared through the sequence) are the same symbol.
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SymbolDefinition {
-    /// The symbol's bits, right-aligned (the first bit is the most significant).
-    pub bits: u64,
+    /// Where one copy of the symbol's bits starts in the shared bit sequence.
+    pub first_bit_offset: u64,
     pub bit_length: u32,
-}
-
-impl SymbolDefinition {
-    pub fn as_bit_string(&self) -> String {
-        (0..self.bit_length).rev().map(|position| if (self.bits >> position) & 1 == 1 { '1' } else { '0' }).collect()
-    }
 }

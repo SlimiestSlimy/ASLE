@@ -79,7 +79,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
             event.pass_number,
             event.round_number,
             event.rank_position,
-            event.merged_definition.as_bit_string(),
+            stream.definition_as_bit_string(event.merged_definition),
             event.frequency,
             event.merged_code_bits_after,
             event.consumed_code_bits_before
@@ -113,7 +113,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
             event.pass_number,
             event.round_number,
             event.rank_position,
-            event.merged_definition.as_bit_string(),
+            stream_after.definition_as_bit_string(event.merged_definition),
             event.merged_symbol_is_new,
             event.frequency,
             event.merged_code_bits_after,
