@@ -4,18 +4,18 @@
 //! | Elias gamma(input bit count + 1)            (the rest is omitted for empty input)
 //! | symbol prefix tree (see symbol_prefix_tree): skipped full levels, child
 //!   bits, gamma(k + 1), combination index; symbols in depth-first order
-//! | code tree shape, depth first (1 = internal, 0 = leaf); its leaves, left
-//!   to right, are the symbols in the same depth-first order
-//! | body: the code of every placed symbol, in order.
+//! | code length section (see code_length_section): which Huffman code length
+//!   each symbol has, as counts per length plus one multiset-permutation index
+//! | body: the canonical Huffman code of every placed symbol, in order.
 //!
-//! The code tree is the optimal tree that keeps the symbols' order (see
-//! order_preserving_code_tree). The builder still decides with Huffman code
-//! lengths; the container is free to encode however is smallest.
+//! The code lengths are exactly the ones the builder decides with, so the
+//! body is exactly the encoded symbol bits the builder measured.
 
 use crate::bit_io::{BitReader, BitWriter};
 use crate::builder_events::BuilderObserver;
-use crate::code_tree::BinaryCodeTree;
-use crate::order_preserving_code_tree::build_order_preserving_optimal_code_tree;
+use crate::canonical_huffman_code::{assign_canonical_codes, CanonicalHuffmanDecoder};
+use crate::code_length_section::{measure_code_length_section_bit_count, read_code_length_section, write_code_length_section};
+use crate::huffman_tree::calculate_code_lengths;
 use crate::packed_bit_sequence::PackedBitSequence;
 use crate::symbol_builder::build_symbol_dictionary;
 use crate::symbol_definition::SymbolDefinition;
@@ -36,17 +36,19 @@ fn describe_leaves_prefix_tree(stream: &SymbolStream) -> SymbolPrefixTreeDescrip
     describe_symbol_prefix_tree(&stream.shared_bit_sequence, leaves)
 }
 
-/// Bits of a code tree shape with this many leaves (a full binary tree).
-fn code_tree_shape_bit_count(leaf_count: usize) -> u64 {
-    2 * leaf_count as u64 - 1
+/// The builder's Huffman code lengths, listed in the prefix tree's depth-first symbol order.
+fn code_lengths_in_depth_first_order(stream: &SymbolStream, prefix_tree: &SymbolPrefixTreeDescription) -> Vec<u32> {
+    let code_lengths_by_symbol_id = calculate_code_lengths(&stream.symbol_frequencies);
+    prefix_tree.symbol_ids_depth_first.iter().map(|&symbol_id| code_lengths_by_symbol_id[symbol_id]).collect()
 }
 
 /// Exact header bits the container would need for the current state.
 /// Measurement only: never used by any building decision.
 pub fn measure_header_bit_count(stream: &SymbolStream) -> u64 {
+    let prefix_tree = describe_leaves_prefix_tree(stream);
     32 + elias_gamma_bit_count(stream.input_bit_count + 1)
-        + describe_leaves_prefix_tree(stream).bit_count()
-        + code_tree_shape_bit_count(stream.leaf_count())
+        + prefix_tree.bit_count()
+        + measure_code_length_section_bit_count(&code_lengths_in_depth_first_order(stream, &prefix_tree))
 }
 
 pub struct DictionaryEntry {
@@ -61,8 +63,6 @@ pub struct CompressionReport {
     pub dictionary: Vec<DictionaryEntry>,
     pub header_bit_count: u64,
     pub body_bit_count: u64,
-    /// What a Huffman body would take (the measure the builder decides with).
-    pub huffman_encoded_symbol_bits: u64,
     pub symbols_created: usize,
 }
 
@@ -79,7 +79,6 @@ pub fn compress_input(
             dictionary: Vec::new(),
             header_bit_count: bit_writer.bits_written,
             body_bit_count: 0,
-            huffman_encoded_symbol_bits: 0,
             symbols_created: 0,
         };
         return (bit_writer.into_bytes(), report);
@@ -90,28 +89,22 @@ pub fn compress_input(
 
     let prefix_tree = describe_leaves_prefix_tree(&stream);
     prefix_tree.write(&mut bit_writer);
-    let leaf_frequencies_depth_first: Vec<u64> =
-        prefix_tree.symbol_ids_depth_first.iter().map(|&symbol_id| stream.symbol_frequencies[symbol_id]).collect();
-    let code_tree = build_order_preserving_optimal_code_tree(&leaf_frequencies_depth_first);
-    code_tree.write_depth_first(&mut bit_writer, &mut |_, _| {});
+    let code_lengths_in_order = code_lengths_in_depth_first_order(&stream, &prefix_tree);
+    write_code_length_section(&mut bit_writer, &code_lengths_in_order);
     let header_bit_count = bit_writer.bits_written;
     assert_eq!(header_bit_count, measure_header_bit_count(&stream), "header measurement and writer disagree");
 
-    let leaf_count = prefix_tree.symbol_ids_depth_first.len();
-    let codes_by_leaf_index = code_tree.calculate_codes_by_leaf_index(leaf_count);
-    let mut leaf_index_by_symbol_id = vec![usize::MAX; stream.symbol_definitions.len()];
-    for (leaf_index, &symbol_id) in prefix_tree.symbol_ids_depth_first.iter().enumerate() {
-        leaf_index_by_symbol_id[symbol_id] = leaf_index;
+    let codes_in_order = assign_canonical_codes(&code_lengths_in_order);
+    let mut position_by_symbol_id = vec![usize::MAX; stream.symbol_definitions.len()];
+    for (position, &symbol_id) in prefix_tree.symbol_ids_depth_first.iter().enumerate() {
+        position_by_symbol_id[symbol_id] = position;
     }
     for &symbol_id in &stream.placed_symbol_ids {
-        let (code_bits, code_length) = codes_by_leaf_index[leaf_index_by_symbol_id[symbol_id as usize]];
+        let (code_bits, code_length) = codes_in_order[position_by_symbol_id[symbol_id as usize]];
         bit_writer.write_bits(code_bits, code_length);
     }
     let body_bit_count = bit_writer.bits_written - header_bit_count;
-    let expected_body_bit_count: u64 = (0..leaf_count)
-        .map(|leaf_index| leaf_frequencies_depth_first[leaf_index] * codes_by_leaf_index[leaf_index].1 as u64)
-        .sum();
-    assert_eq!(body_bit_count, expected_body_bit_count, "code tree and body disagree");
+    assert_eq!(body_bit_count, stream.encoded_symbol_bits(), "body and the builder's encoded symbol bits disagree");
 
     let mut dictionary: Vec<DictionaryEntry> = prefix_tree
         .symbol_ids_depth_first
@@ -121,7 +114,7 @@ pub fn compress_input(
             bit_string: stream.symbol_as_bit_string(symbol_id),
             bit_length: stream.symbol_definitions[symbol_id].bit_length,
             frequency: stream.symbol_frequencies[symbol_id],
-            code_length: codes_by_leaf_index[leaf_index].1,
+            code_length: code_lengths_in_order[leaf_index],
         })
         .collect();
     dictionary.sort_by(|first, second| {
@@ -132,7 +125,6 @@ pub fn compress_input(
         dictionary,
         header_bit_count,
         body_bit_count,
-        huffman_encoded_symbol_bits: stream.encoded_symbol_bits(),
         symbols_created: stream.symbol_definitions.len(),
     };
     (bit_writer.into_bytes(), report)
@@ -147,15 +139,12 @@ pub fn decompress_container(container_bytes: &[u8]) -> Vec<u8> {
     }
     let (decoded_symbol_bits, symbol_definitions_depth_first): (PackedBitSequence, Vec<SymbolDefinition>) =
         read_symbol_prefix_tree(&mut bit_reader);
-    let mut next_leaf_index = 0usize;
-    let code_tree = BinaryCodeTree::read_depth_first(&mut bit_reader, &mut |_| {
-        next_leaf_index += 1;
-        next_leaf_index - 1
-    });
-    assert_eq!(next_leaf_index, symbol_definitions_depth_first.len(), "code tree and prefix tree disagree");
+    let code_lengths_in_order = read_code_length_section(&mut bit_reader);
+    assert_eq!(code_lengths_in_order.len(), symbol_definitions_depth_first.len(), "code lengths and prefix tree disagree");
+    let decoder = CanonicalHuffmanDecoder::from_code_lengths(&code_lengths_in_order);
     let mut output_writer = BitWriter::new();
     while output_writer.bits_written < input_bit_count {
-        let definition = symbol_definitions_depth_first[code_tree.decode_next_leaf_index(&mut bit_reader)];
+        let definition = symbol_definitions_depth_first[decoder.decode_next_position(&mut bit_reader)];
         decoded_symbol_bits.for_each_chunk(definition.first_bit_offset, definition.bit_length as u64, |chunk, count| {
             output_writer.write_bits(chunk, count)
         });

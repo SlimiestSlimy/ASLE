@@ -35,7 +35,8 @@ boundaries.
 | depth-first order | bit by bit, 0 before 1, a prefix before its extensions; every tree here is written and read in this order |
 | skipped full levels | top levels of the prefix tree where every node has both children; their child bits are implied |
 | combination index | one number in [0, C(m, k)) saying which k of m nodes are symbols |
-| order-preserving code tree | the optimal binary code tree whose leaves, left to right, are the symbols in depth-first order (an optimal alphabetic code) |
+| bit length / code length | bits of input a symbol stands for (from the prefix tree) / bits its Huffman code takes in the body (from the code length section) |
+| multiset-permutation index | one number saying which code length each symbol has, given how many symbols have each code length |
 
 ---
 
@@ -76,15 +77,30 @@ symbol prefix tree, depth first:
     combination index                              exactly enough bits for C(m, k) - 1,
                                                    m = non-root nodes with children (depth first)
     (nodes without children are always symbols; the root never is)
-code tree shape, depth first                       1 = internal, 0 = leaf; 2·leaves − 1 bits
-    leaves, left to right = symbols in depth-first order
-body: the code of every placed symbol
+code length section:
+    Elias gamma(longest code length)
+    Elias gamma(count + 1) for each code length    how many symbols have that code length
+    multiset-permutation index                     the code lengths in depth-first symbol order,
+                                                   ranked among all orderings with those counts;
+                                                   exactly enough bits for (orderings − 1)
+body: the canonical Huffman code of every placed symbol
 ```
 
-The container uses the optimal order-preserving code tree (Garsia–Wachs). Its body is
-never shorter than Huffman's, but it needs no table linking codes to symbols. The
-builder still decides with Huffman code lengths. Verified: the Garsia–Wachs body equals
-an independent O(L²) dynamic-programming optimum on every test file.
+Two different lengths: a symbol's **bit length** (bits of input it stands for) comes from
+the prefix tree; its **code length** (bits its code takes in the body) depends on its
+frequency and comes from the code length section.
+
+Canonical codes are handed out by (code length, depth-first position), a rule rather than
+stored bits. The code lengths are exactly the builder's Huffman lengths, so the body equals
+the encoded symbol bits the builder measured (checked on every run). Symbols with equal code
+lengths are interchangeable, so the multiset permutation is exactly the information needed.
+
+Alternatives measured (early builder source / binary, bits to link symbols to codes):
+counts + multiset permutation 1,322 / 1,224 (chosen); Huffman tree shape + multiset
+permutation 2,386 / 2,293; tree shape + full permutation of symbols onto leaves 5,631 / 5,687.
+A full permutation also records the order among same-length codes, which changes nothing.
+*Replaced:* an order-preserving code tree (Garsia–Wachs), whose body was 0.6–7% longer than
+Huffman's; the multiset permutation won on every test file (binary −3,182 bits).
 
 ---
 
@@ -121,11 +137,18 @@ The bold row is the current builder. The first row was not run on every file.
 | gzip -9 | 2,602 | 3,512 | 6,318 | 5,036 | 8,215 |
 | xz -9 | 2,644 | 2,636 | 6,340 | 4,924 | 8,252 |
 
-At n = 16 the new container alone saved 3–12% (text 6,063 → 5,571). Building takes
-under 7 s per file at any n here.
+At n = 16 the prefix-tree container saved 3–12% (text 6,063 → 5,571). Building takes
+under 7 s per file at any n here. These rows predate the multiset-permutation code length
+section, which then saved another 27–397 bytes per file at n = 16:
 
-**Test data caveat:** "text" and "Rust source" are both Rust code (early versions of
-this crate's own source), not prose.
+| n = 16 | text | binary | packed 5-bit | Rust source | random |
+|---|---|---|---|---|---|
+| order-preserving code tree | 5,571 | 6,966 | 6,383 | 12,241 | 10,139 |
+| **canonical Huffman + multiset permutation (current)** | **5,523** | **6,569** | **6,356** | **12,124** | **10,091** |
+
+**Test data:** "text" and "Rust source" are both Rust code (early versions of this crate's
+own source); the files are now named for what they are. Real prose (the 643 KB vim user
+manual) is in the test set for larger runs.
 
 ## Observations from measurement
 
@@ -137,18 +160,22 @@ this crate's own source), not prose.
 - With deletions gated on the encoded symbol bits, no deletion ever lowered them.
   With deletions allowed to raise them, almost every deletion removed 2 leaves and
   added 1, while plain merges added far more leaves.
-- Binary: the order-preserving body costs 3,241 bits more than Huffman's, more than
-  the header saves against writing code lengths (+2,074 bits for order). On the other
-  four files the order-preserving tree wins.
+- Final symbol frequencies (n = 16): leaves used only 2–3 times are 40–60% of every
+  dictionary but cover 3–12% of the input on structured data (31% on random). A handful
+  of symbols cover most of the input (binary: 4 leaves cover 71%).
+- A third to a half of the leaves have a code as long as or longer than their own bits,
+  so they save nothing in the body; they are the rarely used ones.
+- Larger n lowers the body because longer symbols mean fewer placements (early builder
+  source: 9,115 placements at n = 8, 2,067 at n = 256) while the average code length
+  rises only from 5.8 to 9.6 bits. Past n = 32 the leaf count barely changes; the header
+  grows because leaves get longer.
 
 ## Open questions
 
 - What should stop the builder from adding symbols the header has to pay for, without
   measuring the header?
-- Binary data prefers code lengths over order; a one-bit choice per file would be
-  exact.
-- Garsia–Wachs here is O(L²) time in the leaf count; fine so far, a concern for much
-  larger dictionaries.
+- Building time grows quickly with input size: every round re-predicts every candidate
+  with a full Huffman rebuild (the 643 KB vim manual took ~2.5 min per window size by 17).
 
 ---
 
@@ -160,9 +187,10 @@ this crate's own source), not prose.
 | `json_lines_log` | one observer: writes every event as JSON Lines |
 | `container_format` | the file layout; the only module that knows the header |
 | `symbol_prefix_tree` | describes, measures, writes and reads the symbol set |
-| `order_preserving_code_tree` | optimal code tree keeping the symbols' order (Garsia–Wachs) |
-| `code_tree` | binary code tree: codes, write/read depth first, decode |
-| `big_unsigned_integer` | big integers for the combination index |
+| `code_length_section` | writes and reads which code length each symbol has |
+| `canonical_huffman_code` | canonical codes from code lengths, and decoding |
+| `multiset_permutation` | exact ranking and unranking of multiset permutations |
+| `big_unsigned_integer` | big integers for the combination and permutation indexes |
 | `symbol_builder` | decision loop: window sizes, passes, rounds, commit rules |
 | `builder_events` | event records and the observer interface |
 | `option_ranking` | scores and ordering |
