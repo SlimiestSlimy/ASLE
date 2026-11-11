@@ -71,8 +71,7 @@ boundaries.
 ## Container format
 
 ```
-"ASLE" magic                                       32 bits
-Elias gamma(input bit count + 1)                   (nothing more for empty input)
+Elias gamma(placed symbol count + 1)              (nothing more for empty input)
 symbol prefix tree, depth first:
     skipped full levels                            4 bits (0..15)
     child bits: 2 per node at or below them        (has 0-child, has 1-child)
@@ -80,14 +79,22 @@ symbol prefix tree, depth first:
     combination index                              exactly enough bits for C(m, k) - 1,
                                                    m = non-root nodes with children (depth first)
     (nodes without children are always symbols; the root never is)
-code length section:
-    Elias gamma(longest code length)
-    Elias gamma(count + 1) for each code length    how many symbols have that code length
+code length section (nothing for a lone symbol: its code is 0, 1 bit):
+    for code length 1, 2, 3, ...: how many symbols have it, in exactly enough bits for
+        [max(0, 2·slots − remaining), min(remaining, slots)], until no symbol remains
+        (slots: free places at that depth of the full canonical code tree, 2 at length 1,
+        then twice the places not taken by leaves; remaining: symbols not yet placed)
     multiset-permutation index                     the code lengths in depth-first symbol order,
                                                    ranked among all orderings with those counts;
                                                    exactly enough bits for (orderings − 1)
 body: the canonical Huffman code of every placed symbol
 ```
+
+No magic number and no input length: the decoder stops after the placed symbol count, and
+the output length is the sum of the decoded symbols' lengths. ASLE takes an exact bit
+count; a file's last byte is padded with zeros when written, outside the format.
+Measured against the previous section (gamma(input bits + 1), gamma(longest code length),
+gamma(count + 1) per length): −40 to −48 bits per test file.
 
 Two different lengths: a symbol's **bit length** (bits of input it stands for) comes from
 the prefix tree; its **code length** (bits its code takes in the body) depends on its

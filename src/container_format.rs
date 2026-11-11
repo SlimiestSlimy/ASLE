@@ -1,11 +1,11 @@
 //! The ASLE container: the only module that knows the file layout.
 //!
-//! container magic "ASLE" (32 bits)
-//! | Elias gamma(input bit count + 1)            (the rest is omitted for empty input)
+//! Elias gamma(placed symbol count + 1)           (the rest is omitted for empty input)
 //! | symbol prefix tree (see symbol_prefix_tree): skipped full levels, child
 //!   bits, gamma(k + 1), combination index; symbols in depth-first order
 //! | code length section (see code_length_section): which Huffman code length
-//!   each symbol has, as counts per length plus one multiset-permutation index
+//!   each symbol has: counts per code length within the range the code tree
+//!   allows, plus one multiset-permutation index
 //! | body: the canonical Huffman code of every placed symbol, in order.
 //!
 //! The code lengths are exactly the ones the builder decides with, so the
@@ -21,8 +21,6 @@ use crate::symbol_builder::build_symbol_dictionary;
 use crate::symbol_definition::SymbolDefinition;
 use crate::symbol_prefix_tree::{describe_symbol_prefix_tree, read_symbol_prefix_tree, SymbolPrefixTreeDescription};
 use crate::symbol_stream::SymbolStream;
-
-const CONTAINER_MAGIC: u64 = 0x4153_4C45; // "ASLE"
 
 fn elias_gamma_bit_count(value: u64) -> u64 {
     2 * (64 - value.leading_zeros() as u64) - 1
@@ -46,7 +44,7 @@ fn code_lengths_in_depth_first_order(stream: &SymbolStream, prefix_tree: &Symbol
 /// Measurement only: never used by any building decision.
 pub fn measure_header_bit_count(stream: &SymbolStream) -> u64 {
     let prefix_tree = describe_leaves_prefix_tree(stream);
-    32 + elias_gamma_bit_count(stream.input_bit_count + 1)
+    elias_gamma_bit_count(stream.occupied_position_count() as u64 + 1)
         + prefix_tree.bit_count()
         + measure_code_length_section_bit_count(&code_lengths_in_depth_first_order(stream, &prefix_tree))
 }
@@ -66,15 +64,18 @@ pub struct CompressionReport {
     pub symbols_created: usize,
 }
 
+/// Compresses exactly the first `input_bit_count` bits of `input_bytes`.
+/// The returned bytes are the stream, its last byte padded with zeros (a file
+/// holds whole bytes; the padding is not part of the format).
 pub fn compress_input(
     input_bytes: &[u8],
+    input_bit_count: u64,
     maximum_symbol_bit_length: u32,
     observer: &mut dyn BuilderObserver,
 ) -> (Vec<u8>, CompressionReport) {
     let mut bit_writer = BitWriter::new();
-    bit_writer.write_bits(CONTAINER_MAGIC, 32);
-    bit_writer.write_elias_gamma(input_bytes.len() as u64 * 8 + 1);
-    if input_bytes.is_empty() {
+    if input_bit_count == 0 {
+        bit_writer.write_elias_gamma(1);
         let report = CompressionReport {
             dictionary: Vec::new(),
             header_bit_count: bit_writer.bits_written,
@@ -84,8 +85,9 @@ pub fn compress_input(
         return (bit_writer.into_bytes(), report);
     }
 
-    let mut stream = SymbolStream::from_input_bytes(input_bytes, maximum_symbol_bit_length);
+    let mut stream = SymbolStream::from_input_bits(input_bytes, input_bit_count, maximum_symbol_bit_length);
     build_symbol_dictionary(&mut stream, observer);
+    bit_writer.write_elias_gamma(stream.placed_symbol_ids.len() as u64 + 1);
 
     let prefix_tree = describe_leaves_prefix_tree(&stream);
     prefix_tree.write(&mut bit_writer);
@@ -130,24 +132,25 @@ pub fn compress_input(
     (bit_writer.into_bytes(), report)
 }
 
-pub fn decompress_container(container_bytes: &[u8]) -> Vec<u8> {
+/// The decoded bits and how many there are; the bytes' last one is padded with zeros.
+pub fn decompress_container(container_bytes: &[u8]) -> (Vec<u8>, u64) {
     let mut bit_reader = BitReader::new(container_bytes);
-    assert_eq!(bit_reader.read_bits(32), CONTAINER_MAGIC, "not an ASLE container");
-    let input_bit_count = bit_reader.read_elias_gamma() - 1;
-    if input_bit_count == 0 {
-        return Vec::new();
+    let placed_symbol_count = bit_reader.read_elias_gamma() - 1;
+    if placed_symbol_count == 0 {
+        return (Vec::new(), 0);
     }
     let (decoded_symbol_bits, symbol_definitions_depth_first): (PackedBitSequence, Vec<SymbolDefinition>) =
         read_symbol_prefix_tree(&mut bit_reader);
-    let code_lengths_in_order = read_code_length_section(&mut bit_reader);
+    let code_lengths_in_order = read_code_length_section(&mut bit_reader, symbol_definitions_depth_first.len() as u64);
     assert_eq!(code_lengths_in_order.len(), symbol_definitions_depth_first.len(), "code lengths and prefix tree disagree");
     let decoder = CanonicalHuffmanDecoder::from_code_lengths(&code_lengths_in_order);
     let mut output_writer = BitWriter::new();
-    while output_writer.bits_written < input_bit_count {
+    for _ in 0..placed_symbol_count {
         let definition = symbol_definitions_depth_first[decoder.decode_next_position(&mut bit_reader)];
         decoded_symbol_bits.for_each_chunk(definition.first_bit_offset, definition.bit_length as u64, |chunk, count| {
             output_writer.write_bits(chunk, count)
         });
     }
-    output_writer.into_bytes()
+    let decoded_bit_count = output_writer.bits_written;
+    (output_writer.into_bytes(), decoded_bit_count)
 }

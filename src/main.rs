@@ -27,7 +27,7 @@ use symbol_stream::SymbolStream;
 use std::time::Instant;
 
 const USAGE: &str = "usage:
-  asle compress   <input> <output> --max-symbol-bits <n> [--verbose] [--log <file.jsonl>] [--dictionary <file.csv>]
+  asle compress   <input> <output> --max-symbol-bits <n> [--input-bits <count>] [--verbose] [--log <file.jsonl>] [--dictionary <file.csv>]
   asle decompress <input> <output>
   asle benchmark  --max-symbol-bits <n> [--verbose] <files...>";
 
@@ -128,7 +128,7 @@ fn format_ratio(numerator: u64, denominator: u64) -> String {
 
 fn print_report(
     input_name: &str,
-    input_bytes: &[u8],
+    input_bit_count: u64,
     container_bytes: &[u8],
     report: &CompressionReport,
     build_seconds: f64,
@@ -136,10 +136,11 @@ fn print_report(
     print_dictionary: bool,
 ) {
     println!(
-        "{input_name}: {} -> {} bytes ({} bits/byte)  header={} body={} bits  leaves={}  build={:.2}s{}",
-        input_bytes.len(),
+        "{input_name}: {} -> {} bits ({} bytes as a file; {} of the input)  header={} body={} bits  leaves={}  build={:.2}s{}",
+        input_bit_count,
+        report.header_bit_count + report.body_bit_count,
         container_bytes.len(),
-        format_ratio(container_bytes.len() as u64 * 8, input_bytes.len() as u64),
+        format_ratio(report.header_bit_count + report.body_bit_count, input_bit_count),
         report.header_bit_count,
         report.body_bit_count,
         report.dictionary.len(),
@@ -184,6 +185,7 @@ fn main() {
     let mut verbose = false;
     let mut log_path: Option<String> = None;
     let mut dictionary_path: Option<String> = None;
+    let mut input_bit_count_argument: Option<u64> = None;
     let mut positional_arguments: Vec<String> = Vec::new();
     let mut argument_index = 2;
     while argument_index < arguments.len() {
@@ -194,6 +196,11 @@ fn main() {
                     Some(arguments.get(argument_index).and_then(|text| text.parse().ok()).unwrap_or_else(|| exit_with_usage()));
             }
             "--verbose" => verbose = true,
+            "--input-bits" => {
+                argument_index += 1;
+                input_bit_count_argument =
+                    Some(arguments.get(argument_index).and_then(|text| text.parse().ok()).unwrap_or_else(|| exit_with_usage()));
+            }
             "--dictionary" => {
                 argument_index += 1;
                 dictionary_path = Some(arguments.get(argument_index).cloned().unwrap_or_else(|| exit_with_usage()));
@@ -214,36 +221,41 @@ fn main() {
                 exit_with_usage()
             };
             let input_bytes = std::fs::read(input_path).expect("could not read input");
+            let input_bit_count = input_bit_count_argument.unwrap_or(8 * input_bytes.len() as u64);
             let json_lines_log =
                 log_path.map(|path| JsonLinesEncoderLog::create(&path).expect("could not create log file"));
             let mut observer = CommandLineObserver { print_window_size_summaries: verbose, json_lines_log };
             let build_start = Instant::now();
-            let (container_bytes, report) = compress_input(&input_bytes, maximum_symbol_bit_length, &mut observer);
+            let (container_bytes, report) =
+                compress_input(&input_bytes, input_bit_count, maximum_symbol_bit_length, &mut observer);
             let build_seconds = build_start.elapsed().as_secs_f64();
             std::fs::write(output_path, &container_bytes).expect("could not write output");
             if let Some(path) = dictionary_path {
                 write_dictionary_csv(&path, &report).expect("could not write dictionary file");
             }
-            print_report(input_path, &input_bytes, &container_bytes, &report, build_seconds, None, verbose);
+            print_report(input_path, input_bit_count, &container_bytes, &report, build_seconds, None, verbose);
         }
         "decompress" => {
             let [input_path, output_path] = positional_arguments.as_slice() else { exit_with_usage() };
             let container_bytes = std::fs::read(input_path).expect("could not read input");
-            std::fs::write(output_path, decompress_container(&container_bytes)).expect("could not write output");
+            let (decoded_bytes, _decoded_bit_count) = decompress_container(&container_bytes);
+            std::fs::write(output_path, decoded_bytes).expect("could not write output");
         }
         "benchmark" => {
             let Some(maximum_symbol_bit_length) = maximum_symbol_bit_length else { exit_with_usage() };
             for input_path in &positional_arguments {
                 let input_bytes = std::fs::read(input_path).expect("could not read input");
+                let input_bit_count = 8 * input_bytes.len() as u64;
                 let mut observer = CommandLineObserver { print_window_size_summaries: verbose, json_lines_log: None };
                 let build_start = Instant::now();
-                let (container_bytes, report) = compress_input(&input_bytes, maximum_symbol_bit_length, &mut observer);
+                let (container_bytes, report) =
+                    compress_input(&input_bytes, input_bit_count, maximum_symbol_bit_length, &mut observer);
                 let build_seconds = build_start.elapsed().as_secs_f64();
                 let decode_start = Instant::now();
-                let decoded_bytes = decompress_container(&container_bytes);
+                let (decoded_bytes, decoded_bit_count) = decompress_container(&container_bytes);
                 let decode_seconds = decode_start.elapsed().as_secs_f64();
-                assert!(decoded_bytes == input_bytes, "ROUND TRIP FAILED for {input_path}");
-                print_report(input_path, &input_bytes, &container_bytes, &report, build_seconds, Some(decode_seconds), verbose);
+                assert!(decoded_bytes == input_bytes && decoded_bit_count == input_bit_count, "ROUND TRIP FAILED for {input_path}");
+                print_report(input_path, input_bit_count, &container_bytes, &report, build_seconds, Some(decode_seconds), verbose);
             }
         }
         _ => exit_with_usage(),

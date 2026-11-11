@@ -17,12 +17,13 @@ impl PackedBitSequence {
         PackedBitSequence { words: Vec::new(), bit_count: 0 }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
+    /// The first `bit_count` bits of `bytes`, each byte's highest bit first.
+    pub fn from_first_bits_of_bytes(bytes: &[u8], bit_count: u64) -> Self {
+        assert!(bit_count <= 8 * bytes.len() as u64, "more bits asked for than the bytes hold");
         let mut sequence = PackedBitSequence::new();
-        for &byte in bytes {
-            for bit_position in (0..8).rev() {
-                sequence.push_bit(((byte >> bit_position) & 1) as u64);
-            }
+        for bit_index in 0..bit_count {
+            let byte = bytes[(bit_index / 8) as usize];
+            sequence.push_bit(((byte >> (7 - bit_index % 8)) & 1) as u64);
         }
         sequence
     }

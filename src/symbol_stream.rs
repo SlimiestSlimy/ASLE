@@ -39,10 +39,11 @@ pub fn count_leaves(symbol_frequencies: &[u64]) -> usize {
 }
 
 impl SymbolStream {
-    /// Every input bit becomes a placed "0" or "1" symbol.
-    pub fn from_input_bytes(input_bytes: &[u8], maximum_symbol_bit_length: u32) -> Self {
+    /// Every input bit (the first `input_bit_count` bits of the bytes) becomes
+    /// a placed "0" or "1" symbol.
+    pub fn from_input_bits(input_bytes: &[u8], input_bit_count: u64, maximum_symbol_bit_length: u32) -> Self {
         assert!(maximum_symbol_bit_length >= 2, "maximum symbol bit length must be at least 2");
-        let mut shared_bit_sequence = PackedBitSequence::from_bytes(input_bytes);
+        let mut shared_bit_sequence = PackedBitSequence::from_first_bits_of_bytes(input_bytes, input_bit_count);
         let input_bit_count = shared_bit_sequence.bit_count();
         let mut placed_symbol_ids = Vec::with_capacity(input_bit_count as usize);
         for bit_offset in 0..input_bit_count {
