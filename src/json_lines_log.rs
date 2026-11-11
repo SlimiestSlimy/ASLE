@@ -1,6 +1,6 @@
 //! An observer that writes every builder event as one JSON object per line.
 //! Every line also carries the state at that moment: leaves, placed symbols,
-//! W, and the exact header and total bits (measured, never used to decide).
+//! encoded symbol bits, and the exact header and total bits (measured, never used to decide).
 
 use crate::builder_events::*;
 use crate::container_format::measure_header_bit_count;
@@ -19,14 +19,14 @@ impl JsonLinesEncoderLog {
     }
 
     fn write_line(&mut self, event_name: &str, fields: String, stream: &SymbolStream) {
-        let huffman_weight = stream.huffman_weight_in_bits();
+        let encoded_symbol_bits = stream.encoded_symbol_bits();
         let header_bit_count = measure_header_bit_count(stream);
         let _ = writeln!(
             self.writer,
-            "{{\"event\":\"{event_name}\",{fields}\"leaves\":{},\"placed_symbols\":{},\"huffman_weight_W\":{huffman_weight},\"header_bits\":{header_bit_count},\"total_bits\":{}}}",
+            "{{\"event\":\"{event_name}\",{fields}\"leaves\":{},\"placed_symbols\":{},\"encoded_symbol_bits\":{encoded_symbol_bits},\"header_bits\":{header_bit_count},\"total_bits\":{}}}",
             stream.leaf_count(),
             stream.occupied_position_count(),
-            huffman_weight + header_bit_count
+            encoded_symbol_bits + header_bit_count
         );
     }
 }
@@ -127,7 +127,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
             .collect::<Vec<_>>()
             .join(",");
         let fields = format!(
-            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"kind\":\"{kind}\",\"symbol\":\"{}\",\"symbol_is_new\":{},\"frequency\":{},\"consumed_parts\":[{consumed_parts}],\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},\"score_numerator\":{},\"score_denominator\":{},\"W_before\":{},\"W_after_merge\":{},\"W_final\":{},\"leaves_before\":{},\"removed_leaves\":[{}],\"added_leaves\":[{}],\"revived_symbols\":{},\"respellings\":[{respellings}],\"placed_symbols_before\":{},\"consumed_placements_from_respelling\":{},",
+            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"kind\":\"{kind}\",\"symbol\":\"{}\",\"symbol_is_new\":{},\"frequency\":{},\"consumed_parts\":[{consumed_parts}],\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},\"score_numerator\":{},\"score_denominator\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after_merge\":{},\"encoded_symbol_bits_final\":{},\"leaves_before\":{},\"removed_leaves\":[{}],\"added_leaves\":[{}],\"revived_symbols\":{},\"respellings\":[{respellings}],\"placed_symbols_before\":{},\"consumed_placements_from_respelling\":{},",
             self.commit_number,
             event.window_bit_length,
             event.pass_number,
@@ -140,9 +140,9 @@ impl BuilderObserver for JsonLinesEncoderLog {
             event.consumed_code_bits_before,
             event.score_numerator,
             event.score_denominator,
-            event.huffman_weight_before,
-            event.huffman_weight_after_merge,
-            event.huffman_weight_final,
+            event.encoded_symbol_bits_before,
+            event.encoded_symbol_bits_after_merge,
+            event.encoded_symbol_bits_final,
             event.leaves_before,
             quoted_symbol_names(stream_after, event.removed_leaf_ids.iter().copied()),
             quoted_symbol_names(stream_after, event.added_leaf_ids.iter().copied()),

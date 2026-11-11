@@ -1,30 +1,30 @@
-//! Huffman tree: exact weight (W), code lengths, construction, depth-first
-//! serialization and decoding.
+//! Huffman tree: exact encoded symbol bits, code lengths, construction,
+//! depth-first serialization and decoding.
 //!
-//! W ("huffman weight in bits") = sum over all leaves of symbol frequency *
-//! leaf depth = the exact number of bits the encoded symbols take up.
+//! Encoded symbol bits = sum over all leaves of symbol frequency * leaf depth
+//! = the exact number of bits the encoded symbols take up.
 
 use crate::bit_io::{BitReader, BitWriter};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-/// W: sum over leaves of frequency * depth, computed as the sum of all merged
-/// node weights while building the tree. A lone symbol still costs 1 bit per
-/// occurrence.
-pub fn calculate_huffman_weight_in_bits(symbol_frequencies: &[u64]) -> u64 {
+/// Encoded symbol bits: sum over leaves of frequency * depth, computed as the
+/// sum of all merged node weights while building the tree. A lone symbol
+/// still costs 1 bit per occurrence.
+pub fn calculate_encoded_symbol_bits(symbol_frequencies: &[u64]) -> u64 {
     let mut lightest_first: BinaryHeap<Reverse<u64>> =
         symbol_frequencies.iter().copied().filter(|&frequency| frequency > 0).map(Reverse).collect();
     if lightest_first.len() == 1 {
         return lightest_first.pop().unwrap().0;
     }
-    let mut huffman_weight_in_bits = 0;
+    let mut encoded_symbol_bits = 0;
     while lightest_first.len() > 1 {
         let Reverse(lightest_weight) = lightest_first.pop().unwrap();
         let Reverse(second_lightest_weight) = lightest_first.pop().unwrap();
-        huffman_weight_in_bits += lightest_weight + second_lightest_weight;
+        encoded_symbol_bits += lightest_weight + second_lightest_weight;
         lightest_first.push(Reverse(lightest_weight + second_lightest_weight));
     }
-    huffman_weight_in_bits
+    encoded_symbol_bits
 }
 
 /// Code length (leaf depth) of every symbol; 0 for symbols with frequency 0.

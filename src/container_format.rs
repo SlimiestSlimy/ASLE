@@ -127,7 +127,7 @@ pub fn compress_input(
         bit_writer.write_bits(code_bits, code_length);
     }
     let body_bit_count = bit_writer.bits_written - header_bit_count;
-    assert_eq!(body_bit_count, stream.huffman_weight_in_bits(), "Huffman tree and W disagree");
+    assert_eq!(body_bit_count, stream.encoded_symbol_bits(), "Huffman tree and encoded symbol bits disagree");
 
     let mut dictionary: Vec<DictionaryEntry> = (0..stream.symbol_definitions.len())
         .filter(|&symbol_id| stream.symbol_frequencies[symbol_id] > 0)

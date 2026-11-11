@@ -15,8 +15,8 @@ pub struct MergePrediction {
     pub merged_symbol_id: usize,
     pub merged_occurrence_ranges: Vec<OccurrenceRange>,
     pub symbol_frequencies_after: Vec<u64>,
-    /// W after the merge.
-    pub huffman_weight_after: u64,
+    /// Encoded symbol bits after the merge.
+    pub encoded_symbol_bits_after: u64,
     /// Distinct symbols the merge consumes, in order of first appearance.
     pub consumed_symbol_ids: Vec<usize>,
     /// Code bits of every consumed placement, in the tree before the merge.
@@ -35,8 +35,8 @@ pub struct Respelling {
 pub struct DeletionPrediction {
     pub respellings: Vec<Respelling>,
     pub symbol_frequencies_after: Vec<u64>,
-    /// W after the merge and the deletion.
-    pub huffman_weight_after: u64,
+    /// Encoded symbol bits after the merge and the deletion.
+    pub encoded_symbol_bits_after: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -51,6 +51,6 @@ pub struct MergeOption {
     pub deletion: Option<DeletionPrediction>,
     /// Present only when the option lowers the leaf count.
     pub leaf_change_if_shrinking: Option<LeafChange>,
-    /// W after everything the option does.
-    pub final_huffman_weight: u64,
+    /// Encoded symbol bits after everything the option does.
+    pub final_encoded_symbol_bits: u64,
 }

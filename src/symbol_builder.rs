@@ -13,12 +13,12 @@
 //!
 //! Options: a merge alone, or a merge plus the deletion of any subset of its
 //! remaining parts (every subset is tried) when that lowers the leaf count.
-//! A deleting option is committed even if it raises W: a smaller dictionary
-//! is the goal, W only breaks ties.
+//! A deleting option is committed even if it raises the encoded symbol bits:
+//! a smaller dictionary is the goal, encoded symbol bits only break ties.
 
 use crate::builder_events::*;
 use crate::change_prediction::{
-    calculate_huffman_weight_and_code_lengths, count_leaf_change, list_leaves_removed_and_added, predict_deletion,
+    calculate_encoded_symbol_bits_and_code_lengths, count_leaf_change, list_leaves_removed_and_added, predict_deletion,
     predict_merge,
 };
 use crate::merge_candidates::{find_merge_candidates, select_most_non_overlapping_occurrences, MergeCandidate};
@@ -91,7 +91,7 @@ struct RoundContext {
     window_bit_length: u32,
     pass_number: u32,
     round_number: u32,
-    huffman_weight_before: u64,
+    encoded_symbol_bits_before: u64,
     code_lengths_before: Vec<u32>,
     leaves_before: usize,
 }
@@ -117,13 +117,13 @@ fn run_pass(
     let mut round_number = 0;
     loop {
         round_number += 1;
-        let (huffman_weight_before, code_lengths_before) =
-            calculate_huffman_weight_and_code_lengths(&stream.symbol_frequencies);
+        let (encoded_symbol_bits_before, code_lengths_before) =
+            calculate_encoded_symbol_bits_and_code_lengths(&stream.symbol_frequencies);
         let context = RoundContext {
             window_bit_length,
             pass_number: summary.passes,
             round_number,
-            huffman_weight_before,
+            encoded_symbol_bits_before,
             code_lengths_before,
             leaves_before: stream.leaf_count(),
         };
@@ -200,7 +200,7 @@ fn analyze_and_rank_options(
         options.push(find_best_option_for_merge(stream, merge, context, &mut round, summary));
     }
     options.sort_by(|first, second| {
-        compare_by_rank(context.huffman_weight_before, &first.ranking_key(), &second.ranking_key())
+        compare_by_rank(context.encoded_symbol_bits_before, &first.ranking_key(), &second.ranking_key())
     });
     round.option_count = options.len();
     round.best_options_with_deletion = options.iter().filter(|option| option.deletion.is_some()).count();
@@ -224,7 +224,7 @@ fn find_best_option_for_merge(
 
     let mut best_deletion = None;
     let mut best_leaf_change = merge_alone_leaf_change;
-    let mut best_final_huffman_weight = merge.huffman_weight_after;
+    let mut best_final_encoded_symbol_bits = merge.encoded_symbol_bits_after;
 
     let remaining_part_ids: Vec<usize> = merge
         .consumed_symbol_ids
@@ -256,16 +256,16 @@ fn find_best_option_for_merge(
             frequency,
             merged_bits: merge.merged_definition.bits,
             leaf_change_if_shrinking: Some(leaf_change),
-            final_huffman_weight: deletion.huffman_weight_after,
+            final_encoded_symbol_bits: deletion.encoded_symbol_bits_after,
         };
         let current_best = RankingKey {
             frequency,
             merged_bits: merge.merged_definition.bits,
             leaf_change_if_shrinking: best_leaf_change,
-            final_huffman_weight: best_final_huffman_weight,
+            final_encoded_symbol_bits: best_final_encoded_symbol_bits,
         };
-        if compare_by_rank(context.huffman_weight_before, &challenger, &current_best) == Ordering::Less {
-            best_final_huffman_weight = deletion.huffman_weight_after;
+        if compare_by_rank(context.encoded_symbol_bits_before, &challenger, &current_best) == Ordering::Less {
+            best_final_encoded_symbol_bits = deletion.encoded_symbol_bits_after;
             best_leaf_change = Some(leaf_change);
             best_deletion = Some(deletion);
         }
@@ -274,7 +274,7 @@ fn find_best_option_for_merge(
         merge,
         deletion: best_deletion,
         leaf_change_if_shrinking: best_leaf_change,
-        final_huffman_weight: best_final_huffman_weight,
+        final_encoded_symbol_bits: best_final_encoded_symbol_bits,
     }
 }
 
@@ -370,7 +370,7 @@ fn describe_change_before_applying(
                 .collect()
         })
         .unwrap_or_default();
-    let (score_numerator, score_denominator) = calculate_score_fraction(context.huffman_weight_before, &option.ranking_key());
+    let (score_numerator, score_denominator) = calculate_score_fraction(context.encoded_symbol_bits_before, &option.ranking_key());
     let removed_count = removed_leaf_ids.len();
     let added_count = added_leaf_ids.len();
     ChangeCommitted {
@@ -393,9 +393,9 @@ fn describe_change_before_applying(
         consumed_code_bits_before: merge.consumed_code_bits_before,
         score_numerator,
         score_denominator,
-        huffman_weight_before: context.huffman_weight_before,
-        huffman_weight_after_merge: merge.huffman_weight_after,
-        huffman_weight_final: option.final_huffman_weight,
+        encoded_symbol_bits_before: context.encoded_symbol_bits_before,
+        encoded_symbol_bits_after_merge: merge.encoded_symbol_bits_after,
+        encoded_symbol_bits_final: option.final_encoded_symbol_bits,
         leaves_before: context.leaves_before,
         removed_leaf_ids,
         added_leaf_ids,

@@ -2,7 +2,7 @@
 """Charts an ASLE encoder log (JSON Lines) as one self-contained HTML page.
 
 Small multiples over every committed change, sharing the x axis (commit number):
-leaves, W (encoded bits), header bits (measured only), total bits.
+leaves, encoded symbol bits, header bits (measured only), total bits.
 Window-size boundaries are marked; merges with deletion are marked on each line.
 
 usage: python3 tools/plot_encoder_log.py <encoder_log.jsonl> <chart.html>
@@ -18,13 +18,13 @@ def read_commit_points(log_path):
         if event["event"] == "build_started":
             commit_points.append({
                 "commit_number": 0, "window_bit_length": 0, "kind": "start", "symbol": "",
-                "leaves": event["leaves"], "huffman_weight_W": event["huffman_weight_W"],
+                "leaves": event["leaves"], "encoded_symbol_bits": event["encoded_symbol_bits"],
                 "header_bits": event["header_bits"], "total_bits": event["total_bits"],
             })
         elif event["event"] == "change_committed":
             commit_points.append({key: event[key] for key in (
                 "commit_number", "window_bit_length", "kind", "symbol", "leaves",
-                "huffman_weight_W", "header_bits", "total_bits")})
+                "encoded_symbol_bits", "header_bits", "total_bits")})
     return commit_points
 
 
@@ -52,9 +52,9 @@ h1 { font-size: 16px; margin: 0 0 4px; } p { margin: 0 0 12px; color: var(--text
 const points = __DATA__;
 const panels = [
   ["leaves", "Leaves (dictionary size)"],
-  ["huffman_weight_W", "W: encoded symbol bits"],
+  ["encoded_symbol_bits", "Encoded symbol bits"],
   ["header_bits", "Header bits (measured only)"],
-  ["total_bits", "Total bits (W + header)"],
+  ["total_bits", "Total bits (encoded symbols + header)"],
 ];
 const width = 960, height = 170, marginLeft = 64, marginRight = 12, marginTop = 10, marginBottom = 22;
 const lastCommit = points[points.length - 1].commit_number || 1;
@@ -109,7 +109,7 @@ for (const [key, title] of panels) {
     tooltip.style.left = (event.clientX + 14) + "px"; tooltip.style.top = (event.clientY + 14) + "px";
     tooltip.innerHTML = `commit ${p.commit_number} · window ${p.window_bit_length} · ${p.kind}<br>` +
       (p.symbol ? `symbol ${p.symbol}<br>` : "") +
-      `leaves ${p.leaves.toLocaleString()} · W ${p.huffman_weight_W.toLocaleString()}<br>` +
+      `leaves ${p.leaves.toLocaleString()} · encoded symbol bits ${p.encoded_symbol_bits.toLocaleString()}<br>` +
       `header ${p.header_bits.toLocaleString()} · total ${p.total_bits.toLocaleString()}`;
   });
   svg.addEventListener("mouseleave", () => { tooltip.style.display = "none"; for (const c of crosshairs) c.setAttribute("visibility", "hidden"); });

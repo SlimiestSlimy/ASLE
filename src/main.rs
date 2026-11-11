@@ -71,7 +71,7 @@ impl BuilderObserver for CommandLineObserver {
     fn on_window_size_finished(&mut self, event: &WindowSizeFinished, stream: &SymbolStream) {
         if self.print_window_size_summaries {
             eprintln!(
-                "  window={:2} passes={:3} merges={:5} parts_deleted={:4} most_parts={:2} options_evaluated={:7} leaves={:5} W={}{}",
+                "  window={:2} passes={:3} merges={:5} parts_deleted={:4} most_parts={:2} options_evaluated={:7} leaves={:5} encoded_symbol_bits={}{}",
                 event.window_bit_length,
                 event.passes,
                 event.merges_committed,
@@ -79,7 +79,7 @@ impl BuilderObserver for CommandLineObserver {
                 event.most_parts_in_one_candidate,
                 event.options_evaluated,
                 stream.leaf_count(),
-                stream.huffman_weight_in_bits(),
+                stream.encoded_symbol_bits(),
                 if event.stopped_by_repeated_state { "  (stopped: repeated state)" } else { "" }
             );
         }

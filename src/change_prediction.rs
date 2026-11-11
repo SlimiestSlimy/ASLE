@@ -1,20 +1,22 @@
 //! Analysis: predicting what a merge or a deletion would do, without changing
-//! anything. Every prediction carries the exact frequencies and W afterwards.
+//! anything. Every prediction carries the exact frequencies and encoded symbol bits
+//! afterwards.
 
 use crate::huffman_tree::calculate_code_lengths;
 use crate::predicted_changes::{DeletionPrediction, LeafChange, MergePrediction, OccurrenceRange, Respelling};
 use crate::symbol_definition::SymbolDefinition;
 use crate::symbol_stream::SymbolStream;
 
-/// W (sum of frequency * code length) and every symbol's code length.
-pub fn calculate_huffman_weight_and_code_lengths(symbol_frequencies: &[u64]) -> (u64, Vec<u32>) {
+/// Encoded symbol bits (sum of frequency * code length) and every symbol's
+/// code length.
+pub fn calculate_encoded_symbol_bits_and_code_lengths(symbol_frequencies: &[u64]) -> (u64, Vec<u32>) {
     let code_lengths = calculate_code_lengths(symbol_frequencies);
-    let huffman_weight_in_bits = symbol_frequencies
+    let encoded_symbol_bits = symbol_frequencies
         .iter()
         .zip(&code_lengths)
         .map(|(&frequency, &code_length)| frequency * code_length as u64)
         .sum();
-    (huffman_weight_in_bits, code_lengths)
+    (encoded_symbol_bits, code_lengths)
 }
 
 /// Ids of the leaves that disappear and the leaves that appear going from
@@ -69,8 +71,8 @@ pub fn predict_merge(
         }
         symbol_frequencies_after[merged_symbol_id] += 1;
     }
-    let (huffman_weight_after, code_lengths_after) =
-        calculate_huffman_weight_and_code_lengths(&symbol_frequencies_after);
+    let (encoded_symbol_bits_after, code_lengths_after) =
+        calculate_encoded_symbol_bits_and_code_lengths(&symbol_frequencies_after);
     let merged_code_bits_after = merged_occurrence_ranges.len() as u64 * code_lengths_after[merged_symbol_id] as u64;
     MergePrediction {
         candidate_index,
@@ -78,7 +80,7 @@ pub fn predict_merge(
         merged_symbol_id,
         merged_occurrence_ranges,
         symbol_frequencies_after,
-        huffman_weight_after,
+        encoded_symbol_bits_after,
         consumed_symbol_ids,
         consumed_code_bits_before,
         merged_code_bits_after,
@@ -153,6 +155,6 @@ pub fn predict_deletion(
         }
         respellings.push(Respelling { deleted_symbol_id, replacement_symbol_ids });
     }
-    let (huffman_weight_after, _) = calculate_huffman_weight_and_code_lengths(&symbol_frequencies_after);
-    Some(DeletionPrediction { respellings, symbol_frequencies_after, huffman_weight_after })
+    let (encoded_symbol_bits_after, _) = calculate_encoded_symbol_bits_and_code_lengths(&symbol_frequencies_after);
+    Some(DeletionPrediction { respellings, symbol_frequencies_after, encoded_symbol_bits_after })
 }

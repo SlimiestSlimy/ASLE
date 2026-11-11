@@ -6,7 +6,7 @@
 //! state. Everything else reads it.
 
 use crate::fast_hash::FastHashMap;
-use crate::huffman_tree::calculate_huffman_weight_in_bits;
+use crate::huffman_tree::calculate_encoded_symbol_bits;
 use crate::predicted_changes::{DeletionPrediction, MergePrediction};
 use crate::symbol_definition::SymbolDefinition;
 
@@ -64,9 +64,9 @@ impl SymbolStream {
         count_leaves(&self.symbol_frequencies)
     }
 
-    /// W: exact bits the encoded symbols take up.
-    pub fn huffman_weight_in_bits(&self) -> u64 {
-        calculate_huffman_weight_in_bits(&self.symbol_frequencies)
+    /// Encoded symbol bits: exact bits the encoded symbols take up.
+    pub fn encoded_symbol_bits(&self) -> u64 {
+        calculate_encoded_symbol_bits(&self.symbol_frequencies)
     }
 
     /// Any symbol ever defined, alive (leaf) or dead (frequency 0).
