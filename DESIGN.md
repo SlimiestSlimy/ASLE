@@ -49,21 +49,24 @@ boundaries.
 3. **Occurrences.** The most non-overlapping occurrences, taken left to right. All
    occurrences have the same bit length, so this gives the maximum count.
 4. **A merge must repeat** (2+ occurrences): a single occurrence is not a pattern.
-5. **Shorter-code rule.** A merge commits only if its code bits (Huffman tree after the
-   merge) are fewer than the code bits of the placements it replaces (tree before).
-   *Why:* "total encoded symbol bits must drop" committed nothing at all on text,
-   because the first new leaf pushes `0` or `1` a level deeper.
-6. **The header never enters a decision.** It is measured and logged only.
-7. **Ranking.** score = frequency × (1 + (bits_before − bits_after) / bits_before), bits =
+5. **Judged on the whole.** A change (merge or leaf removal) commits when it strictly
+   lowers the total encoded symbol bits (sum over all leaves of frequency × Huffman code
+   length). The header never enters a decision.
+6. **Best point.** Every window size commits at least one merge: if a window size
+   reaches a round where no merge lowers the total and it has not committed a merge yet,
+   its best-ranked merge is committed anyway. *Why:* from the start state no single merge
+   can lower the total on text-like data (the first new leaf pushes `0` or `1` a level
+   deeper), so judging on the whole alone committed nothing on the Rust files.
+7. **Leaf removal first.** Each round, before merges: leaves whose code is longer than
+   their own bits (break-even leaves stay: they are building blocks) are checked, biggest
+   loss first (frequency × (code length − bit length)); the first whose respelling with
+   other live leaves (fewest code bits, exact) lowers the total is removed.
+8. **Ranking.** score = frequency × (1 + (bits_before − bits_after) / bits_before), bits =
    encoded symbol bits; exact integer comparison. Ties: higher frequency, then smaller
-   bit value. Scores are recomputed after every commit, since the tree changes.
-8. **No deletions.** Deleting parts of a merge (with respelling and revival) was tried in
-   several forms and always made the dictionary and the output larger; it is removed
-   (see history; the code is in git).
-9. **Stopping.** A window size ends when a pass commits nothing. Every merge strictly
-   reduces the number of placed symbols, so building always terminates.
-
----
+   bit value. Scores are recomputed after every change, since the tree changes.
+9. **Stopping.** A window size ends when a pass commits nothing, or when an exact state
+   (all frequencies) repeats (a removal puts placements back, so merges and removals
+   could undo each other).
 
 ## Container format
 
@@ -122,7 +125,19 @@ Huffman's; the multiset permutation won on every test file (binary −3,182 bits
 
 The bold row is the current builder. The first row was not run on every file.
 
-### Current builder, new container, by n
+### Decision rules with the canonical container (n = 16; random is a noise reference, not counted)
+
+| Merge rule / removal | packed 5-bit | binary | Rust source | early builder | **total (4)** | *random* |
+|---|---|---|---|---|---|---|
+| per-symbol, no removal | 6,356 | 6,569 | 12,124 | 5,523 | 30,572 | *10,091* |
+| per-symbol, remove if code ≥ bits, always | 6,256 | 7,247 | 13,213 | 6,150 | 32,866 | *10,547* |
+| per-symbol, remove if code > bits, always | 6,033 | 6,936 | 13,163 | 6,282 | 32,414 | *10,455* |
+| whole total, whole-total removals | 5,015 | 6,387 | 16,394 (stuck) | 7,356 (stuck) | 35,152 | *8,202* |
+| per-symbol merges, whole-total removals | 6,256 | 6,486 | 11,812 | 5,550 | 30,104 | *10,055* |
+| whole total, explore + roll back to lowest total | 5,768 | 6,620 | 11,421 | 5,525 | 29,334 | *8,202* |
+| **whole total + one forced merge per window size (current)** | **5,319** | **6,391** | **12,168** | **5,535** | **29,413** | *9,930* |
+
+### Builder before the decision-rule changes, by n (previous containers)
 
 | n | text | binary | packed 5-bit | Rust source | random |
 |---|---|---|---|---|---|

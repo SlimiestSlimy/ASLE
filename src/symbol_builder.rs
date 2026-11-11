@@ -1,25 +1,39 @@
 //! Decision: the bottom-up loop that builds the symbol dictionary.
 //!
-//! For each window size 2..=n, passes repeat until a pass commits nothing.
-//! A pass finds the merge candidates once, then runs rounds: predict every
-//! remaining candidate's merge against the current state (change_prediction),
-//! rank the merges (option_ranking), and commit the best merge that passes the
-//! commit rules (applied by symbol_stream). Every merge strictly reduces the
-//! number of placed symbols, so this always terminates.
+//! For each window size 2..=n, passes repeat until a pass commits nothing (or
+//! an exact state repeats). A pass finds the merge candidates once, then runs
+//! rounds. Each round, against the current state:
+//! 1. Leaf removal first: every leaf whose code is longer than its own bits
+//!    (non-saving; break-even leaves stay), biggest loss first, is predicted respelled with other
+//!    live leaves (fewest code bits); the first that can be respelled and is
+//!    worth removing is removed. Positions change, so the pass ends.
+//! 2. Otherwise merges: predict every remaining candidate's merge, rank them
+//!    (option_ranking), commit the best one that passes the merge rules.
 //!
-//! Commit rules:
-//! * a merge must repeat: 2 or more non-overlapping occurrences;
-//! * the merged symbol's code bits (tree after the merge) must be fewer than
-//!   the code bits of the placements it replaces (tree before the merge).
+//! Commit rules, judged on the whole: a change (merge or leaf removal) is
+//! committed when it strictly lowers the total encoded symbol bits (sum over
+//! all leaves of frequency * Huffman code length). Header bits never enter a
+//! decision. A merge must also repeat: 2 or more non-overlapping occurrences.
+//!
+//! Best point: every window size commits at least one merge. If a window size
+//! reaches a round where no merge lowers the total and it has not committed a
+//! merge yet, its best-ranked merge is committed anyway; after that the normal
+//! rule applies again. This gets the build past points where only several
+//! merges together pay off.
+//!
+//! A removal puts placements back, so a merge and a removal could undo each
+//! other; a window size stops when an exact state (all frequencies) repeats.
 
 use crate::builder_events::*;
 use crate::change_prediction::{
-    calculate_encoded_symbol_bits_and_code_lengths, list_leaves_removed_and_added, predict_merge,
+    calculate_encoded_symbol_bits_and_code_lengths, find_non_saving_leaves, list_leaves_removed_and_added,
+    predict_leaf_removal, predict_merge,
 };
 use crate::merge_candidates::{find_merge_candidates, select_most_non_overlapping_occurrences, MergeCandidate};
 use crate::option_ranking::{calculate_score_numerator, compare_by_rank};
-use crate::predicted_changes::MergePrediction;
+use crate::predicted_changes::{LeafRemovalPrediction, MergePrediction};
 use crate::symbol_stream::{count_leaves, SymbolStream};
+use std::collections::HashSet;
 use std::time::Instant;
 
 pub fn build_symbol_dictionary(stream: &mut SymbolStream, observer: &mut dyn BuilderObserver) {
@@ -43,13 +57,25 @@ fn run_window_size(
     observer: &mut dyn BuilderObserver,
 ) -> WindowSizeFinished {
     let window_start = Instant::now();
-    let mut summary =
-        WindowSizeFinished { window_bit_length, passes: 0, merges_committed: 0, merges_evaluated: 0, elapsed_milliseconds: 0 };
+    let mut summary = WindowSizeFinished {
+        window_bit_length,
+        passes: 0,
+        merges_committed: 0,
+        merge_committed_without_lowering_the_total: false,
+        leaves_removed: 0,
+        stopped_by_repeated_state: false,
+        merges_evaluated: 0,
+        elapsed_milliseconds: 0,
+    };
+    let mut frequency_states_seen: HashSet<Vec<u64>> = HashSet::new();
     loop {
         summary.passes += 1;
-        let merges_this_pass = run_pass(stream, window_bit_length, &mut summary, observer);
-        summary.merges_committed += merges_this_pass;
-        if merges_this_pass == 0 {
+        let changes_this_pass = run_pass(stream, window_bit_length, &mut summary, observer);
+        if changes_this_pass == 0 {
+            break;
+        }
+        if !frequency_states_seen.insert(stream.symbol_frequencies.clone()) {
+            summary.stopped_by_repeated_state = true;
             break;
         }
     }
@@ -67,7 +93,7 @@ struct RoundContext {
     leaves_before: usize,
 }
 
-/// Returns the number of merges committed in this pass.
+/// Returns the number of changes (merges and leaf removals) committed in this pass.
 fn run_pass(
     stream: &mut SymbolStream,
     window_bit_length: u32,
@@ -84,7 +110,7 @@ fn run_pass(
     observer.on_pass_started(&pass_started, stream);
     let mut position_consumed_this_pass = vec![false; stream.placed_symbol_ids.len()];
     let mut candidate_finished = vec![false; merge_candidates.len()];
-    let mut merges_committed = 0;
+    let mut changes_committed = 0;
     let mut round_number = 0;
     loop {
         round_number += 1;
@@ -98,15 +124,23 @@ fn run_pass(
             code_lengths_before,
             leaves_before: stream.leaf_count(),
         };
+        let removal_scan = find_leaf_to_remove(stream, &context);
+        if let Some(removal) = removal_scan.removal {
+            report_and_apply_leaf_removal(stream, removal, &context, removal_scan.non_saving_leaves, observer);
+            summary.leaves_removed += 1;
+            // Positions changed; the candidates are stale. The next pass rescans.
+            return changes_committed + 1;
+        }
         let ranked_merges = predict_and_rank_merges(
             stream,
             &merge_candidates,
             &context,
+            &removal_scan,
             &position_consumed_this_pass,
             &mut candidate_finished,
             observer,
         );
-        let committed = commit_best_passing_merge(
+        let committed = commit_best_merge(
             stream,
             ranked_merges,
             &context,
@@ -118,10 +152,72 @@ fn run_pass(
         if !committed {
             break;
         }
-        merges_committed += 1;
+        changes_committed += 1;
+        summary.merges_committed += 1;
     }
     stream.remove_vacated_positions();
-    merges_committed
+    changes_committed
+}
+
+struct LeafRemovalScan {
+    non_saving_leaves: usize,
+    non_saving_leaves_unspellable: usize,
+    removal: Option<LeafRemovalPrediction>,
+}
+
+/// Leaf removal rule: the total encoded symbol bits must strictly drop.
+fn leaf_removal_lowers_encoded_symbol_bits(removal: &LeafRemovalPrediction, context: &RoundContext) -> bool {
+    removal.encoded_symbol_bits_after < context.encoded_symbol_bits_before
+}
+
+/// Analysis + decision: the first non-saving leaf (biggest loss first) that
+/// can be respelled and is worth removing.
+fn find_leaf_to_remove(stream: &SymbolStream, context: &RoundContext) -> LeafRemovalScan {
+    let non_saving_leaf_ids = find_non_saving_leaves(stream, &context.code_lengths_before);
+    let mut scan = LeafRemovalScan {
+        non_saving_leaves: non_saving_leaf_ids.len(),
+        non_saving_leaves_unspellable: 0,
+        removal: None,
+    };
+    for symbol_id in non_saving_leaf_ids {
+        match predict_leaf_removal(stream, symbol_id, &context.code_lengths_before) {
+            None => scan.non_saving_leaves_unspellable += 1,
+            Some(removal) => {
+                if leaf_removal_lowers_encoded_symbol_bits(&removal, context) {
+                    scan.removal = Some(removal);
+                    break;
+                }
+            }
+        }
+    }
+    scan
+}
+
+fn report_and_apply_leaf_removal(
+    stream: &mut SymbolStream,
+    removal: LeafRemovalPrediction,
+    context: &RoundContext,
+    non_saving_leaves: usize,
+    observer: &mut dyn BuilderObserver,
+) {
+    let event = LeafRemoved {
+        window_bit_length: context.window_bit_length,
+        pass_number: context.pass_number,
+        round_number: context.round_number,
+        removed_symbol_id: removal.removed_symbol_id,
+        removed_frequency: removal.removed_frequency,
+        removed_bit_length: stream.symbol_definitions[removal.removed_symbol_id].bit_length,
+        removed_code_length_before: context.code_lengths_before[removal.removed_symbol_id],
+        removed_code_bits_before: removal.removed_code_bits_before,
+        replacement_symbol_ids: removal.replacement_symbol_ids.clone(),
+        replacement_code_bits_after: removal.replacement_code_bits_after,
+        encoded_symbol_bits_before: context.encoded_symbol_bits_before,
+        encoded_symbol_bits_after: removal.encoded_symbol_bits_after,
+        leaves_before: context.leaves_before,
+        non_saving_leaves,
+    };
+    stream.apply_leaf_removal(&removal);
+    observer.on_leaf_removed(&event, stream);
 }
 
 /// Analysis for one round: every remaining candidate's merge is predicted,
@@ -130,6 +226,7 @@ fn predict_and_rank_merges(
     stream: &SymbolStream,
     merge_candidates: &[MergeCandidate],
     context: &RoundContext,
+    removal_scan: &LeafRemovalScan,
     position_consumed_this_pass: &[bool],
     candidate_finished: &mut [bool],
     observer: &mut dyn BuilderObserver,
@@ -139,6 +236,8 @@ fn predict_and_rank_merges(
         pass_number: context.pass_number,
         round_number: context.round_number,
         merges_ranked: 0,
+        non_saving_leaves: removal_scan.non_saving_leaves,
+        non_saving_leaves_unspellable: removal_scan.non_saving_leaves_unspellable,
         candidates_dropped_for_single_occurrence: 0,
         merges_that_lower_the_leaf_count: 0,
     };
@@ -174,14 +273,16 @@ fn predict_and_rank_merges(
     merges
 }
 
-/// Commit rule: the merged code must be shorter than the codes it replaces.
-fn merged_code_is_shorter_than_replaced_codes(merge: &MergePrediction) -> bool {
-    merge.merged_code_bits_after < merge.consumed_code_bits_before
+/// Merge rule: a merge is preferred when the total encoded symbol bits drop.
+fn merge_lowers_encoded_symbol_bits(merge: &MergePrediction, context: &RoundContext) -> bool {
+    merge.encoded_symbol_bits_after < context.encoded_symbol_bits_before
 }
 
-/// Decision + application: commit the highest-ranked merge that passes the
-/// commit rules. Returns whether one was committed.
-fn commit_best_passing_merge(
+/// Decision + application: commit the highest-ranked merge that lowers the
+/// total. If none does and this window size has not committed a merge yet,
+/// commit the highest-ranked merge anyway (best point). Returns whether a
+/// merge was committed.
+fn commit_best_merge(
     stream: &mut SymbolStream,
     ranked_merges: Vec<MergePrediction>,
     context: &RoundContext,
@@ -190,10 +291,22 @@ fn commit_best_passing_merge(
     summary: &mut WindowSizeFinished,
     observer: &mut dyn BuilderObserver,
 ) -> bool {
-    for (rank_position, merge) in ranked_merges.into_iter().enumerate() {
+    let first_lowering_rank_position =
+        ranked_merges.iter().position(|merge| merge_lowers_encoded_symbol_bits(merge, context));
+    let window_size_has_no_merge_yet = summary.merges_committed == 0;
+    let chosen_rank_position = match first_lowering_rank_position {
+        Some(rank_position) => Some(rank_position),
+        None if window_size_has_no_merge_yet && !ranked_merges.is_empty() => Some(0),
+        None => None,
+    };
+    let evaluated_count = match first_lowering_rank_position {
+        Some(rank_position) => rank_position + 1,
+        None => ranked_merges.len(),
+    };
+    for (rank_position, merge) in ranked_merges.iter().enumerate().take(evaluated_count) {
         summary.merges_evaluated += 1;
         candidate_finished[merge.candidate_index] = true;
-        if !merged_code_is_shorter_than_replaced_codes(&merge) {
+        if Some(rank_position) != chosen_rank_position {
             let rejected = MergeRejected {
                 window_bit_length: context.window_bit_length,
                 pass_number: context.pass_number,
@@ -201,19 +314,22 @@ fn commit_best_passing_merge(
                 rank_position,
                 merged_definition: merge.merged_definition,
                 frequency: merge.merged_occurrence_ranges.len(),
-                reason: RejectionReason::MergedCodeNotShorter,
+                reason: RejectionReason::EncodedSymbolBitsDoNotDrop,
                 merged_code_bits_after: merge.merged_code_bits_after,
                 consumed_code_bits_before: merge.consumed_code_bits_before,
             };
             observer.on_merge_rejected(&rejected, stream);
-            continue;
         }
-        let committed = describe_merge_before_applying(stream, &merge, context, rank_position);
-        stream.apply_merge(&merge, position_consumed_this_pass);
-        observer.on_change_committed(&committed, stream);
-        return true;
     }
-    false
+    let Some(chosen_rank_position) = chosen_rank_position else { return false };
+    let merge = &ranked_merges[chosen_rank_position];
+    if !merge_lowers_encoded_symbol_bits(merge, context) {
+        summary.merge_committed_without_lowering_the_total = true;
+    }
+    let committed = describe_merge_before_applying(stream, merge, context, chosen_rank_position);
+    stream.apply_merge(merge, position_consumed_this_pass);
+    observer.on_change_committed(&committed, stream);
+    true
 }
 
 /// Builds the full record of a merge from the state before it is applied.
@@ -251,6 +367,7 @@ fn describe_merge_before_applying(
         },
         merged_definition: merge.merged_definition,
         merged_symbol_is_new: merge.merged_symbol_id == stream.symbol_definitions.len(),
+        lowered_the_total: merge.encoded_symbol_bits_after < context.encoded_symbol_bits_before,
         frequency: merge.merged_occurrence_ranges.len(),
         consumed_parts,
         merged_code_bits_after: merge.merged_code_bits_after,

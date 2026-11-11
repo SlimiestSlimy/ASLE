@@ -17,14 +17,17 @@ pub struct RoundAnalyzed {
     pub pass_number: u32,
     pub round_number: u32,
     pub merges_ranked: usize,
+    /// Leaves whose code is longer than their bits, found at round start.
+    pub non_saving_leaves: usize,
+    /// Non-saving leaves that could not be respelled with other live leaves.
+    pub non_saving_leaves_unspellable: usize,
     pub candidates_dropped_for_single_occurrence: u64,
     pub merges_that_lower_the_leaf_count: u64,
 }
 
 pub enum RejectionReason {
-    /// The merged symbol's code bits (tree after) are not fewer than the code
-    /// bits of the placements it replaces (tree before).
-    MergedCodeNotShorter,
+    /// The total encoded symbol bits after the merge would not be lower.
+    EncodedSymbolBitsDoNotDrop,
 }
 
 pub struct MergeRejected {
@@ -60,6 +63,9 @@ pub struct ChangeCommitted {
     pub kind: CommitKind,
     pub merged_definition: SymbolDefinition,
     pub merged_symbol_is_new: bool,
+    /// False when no merge lowered the total and this one was committed anyway
+    /// (best point: every window size commits at least one merge).
+    pub lowered_the_total: bool,
     pub frequency: usize,
     pub consumed_parts: Vec<ConsumedPart>,
     pub merged_code_bits_after: u64,
@@ -73,10 +79,32 @@ pub struct ChangeCommitted {
     pub placed_symbols_before: usize,
 }
 
+/// Everything about one removed leaf. Symbol ids refer to the stream after.
+pub struct LeafRemoved {
+    pub window_bit_length: u32,
+    pub pass_number: u32,
+    pub round_number: u32,
+    pub removed_symbol_id: usize,
+    pub removed_frequency: u64,
+    pub removed_bit_length: u32,
+    pub removed_code_length_before: u32,
+    pub removed_code_bits_before: u64,
+    pub replacement_symbol_ids: Vec<u32>,
+    pub replacement_code_bits_after: u64,
+    pub encoded_symbol_bits_before: u64,
+    pub encoded_symbol_bits_after: u64,
+    pub leaves_before: usize,
+    pub non_saving_leaves: usize,
+}
+
 pub struct WindowSizeFinished {
     pub window_bit_length: u32,
     pub passes: u32,
     pub merges_committed: u32,
+    /// The window size's best-ranked merge was committed without lowering the total.
+    pub merge_committed_without_lowering_the_total: bool,
+    pub leaves_removed: u32,
+    pub stopped_by_repeated_state: bool,
     pub merges_evaluated: u64,
     pub elapsed_milliseconds: u128,
 }
@@ -94,6 +122,7 @@ pub trait BuilderObserver {
     fn on_round_analyzed(&mut self, _event: &RoundAnalyzed, _stream: &SymbolStream) {}
     fn on_merge_rejected(&mut self, _event: &MergeRejected, _stream: &SymbolStream) {}
     fn on_change_committed(&mut self, _event: &ChangeCommitted, _stream_after: &SymbolStream) {}
+    fn on_leaf_removed(&mut self, _event: &LeafRemoved, _stream_after: &SymbolStream) {}
     fn on_window_size_finished(&mut self, _event: &WindowSizeFinished, _stream: &SymbolStream) {}
     fn on_build_finished(&mut self, _event: &BuildFinished, _stream: &SymbolStream) {}
 }

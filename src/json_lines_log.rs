@@ -59,11 +59,13 @@ impl BuilderObserver for JsonLinesEncoderLog {
 
     fn on_round_analyzed(&mut self, event: &RoundAnalyzed, stream: &SymbolStream) {
         let fields = format!(
-            "\"window_bit_length\":{},\"pass\":{},\"round\":{},\"merges_ranked\":{},\"candidates_dropped_for_single_occurrence\":{},\"merges_that_lower_the_leaf_count\":{},",
+            "\"window_bit_length\":{},\"pass\":{},\"round\":{},\"merges_ranked\":{},\"non_saving_leaves\":{},\"non_saving_leaves_unspellable\":{},\"candidates_dropped_for_single_occurrence\":{},\"merges_that_lower_the_leaf_count\":{},",
             event.window_bit_length,
             event.pass_number,
             event.round_number,
             event.merges_ranked,
+            event.non_saving_leaves,
+            event.non_saving_leaves_unspellable,
             event.candidates_dropped_for_single_occurrence,
             event.merges_that_lower_the_leaf_count
         );
@@ -72,7 +74,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
 
     fn on_merge_rejected(&mut self, event: &MergeRejected, stream: &SymbolStream) {
         let reason = match event.reason {
-            RejectionReason::MergedCodeNotShorter => "merged_code_not_shorter",
+            RejectionReason::EncodedSymbolBitsDoNotDrop => "encoded_symbol_bits_do_not_drop",
         };
         let fields = format!(
             "\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"symbol\":\"{}\",\"frequency\":{},\"reason\":\"{reason}\",\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},",
@@ -108,7 +110,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
             .collect::<Vec<_>>()
             .join(",");
         let fields = format!(
-            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"kind\":\"{kind}\",\"symbol\":\"{}\",\"symbol_is_new\":{},\"frequency\":{},\"consumed_parts\":[{consumed_parts}],\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},\"score_numerator\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after\":{},\"leaves_before\":{},\"removed_leaves\":[{}],\"added_leaves\":[{}],\"placed_symbols_before\":{},",
+            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"kind\":\"{kind}\",\"symbol\":\"{}\",\"symbol_is_new\":{},\"lowered_the_total\":{},\"frequency\":{},\"consumed_parts\":[{consumed_parts}],\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},\"score_numerator\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after\":{},\"leaves_before\":{},\"removed_leaves\":[{}],\"added_leaves\":[{}],\"placed_symbols_before\":{},",
             self.commit_number,
             event.window_bit_length,
             event.pass_number,
@@ -116,6 +118,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
             event.rank_position,
             stream_after.definition_as_bit_string(event.merged_definition),
             event.merged_symbol_is_new,
+            event.lowered_the_total,
             event.frequency,
             event.merged_code_bits_after,
             event.consumed_code_bits_before,
@@ -130,10 +133,40 @@ impl BuilderObserver for JsonLinesEncoderLog {
         self.write_line("change_committed", fields, stream_after);
     }
 
+    fn on_leaf_removed(&mut self, event: &LeafRemoved, stream_after: &SymbolStream) {
+        self.commit_number += 1;
+        let fields = format!(
+            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"removed_symbol\":\"{}\",\"removed_frequency\":{},\"removed_bit_length\":{},\"removed_code_length_before\":{},\"removed_code_bits_before\":{},\"respelled_as\":[{}],\"replacement_code_bits_after\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after\":{},\"leaves_before\":{},\"non_saving_leaves\":{},",
+            self.commit_number,
+            event.window_bit_length,
+            event.pass_number,
+            event.round_number,
+            stream_after.symbol_as_bit_string(event.removed_symbol_id),
+            event.removed_frequency,
+            event.removed_bit_length,
+            event.removed_code_length_before,
+            event.removed_code_bits_before,
+            quoted_symbol_names(stream_after, event.replacement_symbol_ids.iter().map(|&id| id as usize)),
+            event.replacement_code_bits_after,
+            event.encoded_symbol_bits_before,
+            event.encoded_symbol_bits_after,
+            event.leaves_before,
+            event.non_saving_leaves
+        );
+        self.write_line("leaf_removed", fields, stream_after);
+    }
+
     fn on_window_size_finished(&mut self, event: &WindowSizeFinished, stream: &SymbolStream) {
         let fields = format!(
-            "\"window_bit_length\":{},\"passes\":{},\"merges_committed\":{},\"merges_evaluated\":{},\"elapsed_milliseconds\":{},",
-            event.window_bit_length, event.passes, event.merges_committed, event.merges_evaluated, event.elapsed_milliseconds
+            "\"window_bit_length\":{},\"passes\":{},\"merges_committed\":{},\"merge_committed_without_lowering_the_total\":{},\"leaves_removed\":{},\"stopped_by_repeated_state\":{},\"merges_evaluated\":{},\"elapsed_milliseconds\":{},",
+            event.window_bit_length,
+            event.passes,
+            event.merges_committed,
+            event.merge_committed_without_lowering_the_total,
+            event.leaves_removed,
+            event.stopped_by_repeated_state,
+            event.merges_evaluated,
+            event.elapsed_milliseconds
         );
         self.write_line("window_size_finished", fields, stream);
     }

@@ -74,13 +74,21 @@ impl BuilderObserver for CommandLineObserver {
             log.on_change_committed(event, stream_after);
         }
     }
+    fn on_leaf_removed(&mut self, event: &LeafRemoved, stream_after: &SymbolStream) {
+        if let Some(log) = self.json_lines_log.as_mut() {
+            log.on_leaf_removed(event, stream_after);
+        }
+    }
     fn on_window_size_finished(&mut self, event: &WindowSizeFinished, stream: &SymbolStream) {
         if self.print_window_size_summaries {
             eprintln!(
-                "  window={:3} passes={:3} merges={:5} merges_evaluated={:7} leaves={:5} encoded_symbol_bits={} ms={}",
+                "  window={:3} passes={:3} merges={:5}{} leaves_removed={:5}{} merges_evaluated={:7} leaves={:5} encoded_symbol_bits={} ms={}",
                 event.window_bit_length,
                 event.passes,
                 event.merges_committed,
+                if event.merge_committed_without_lowering_the_total { " (1 forced)" } else { "" },
+                event.leaves_removed,
+                if event.stopped_by_repeated_state { " (stopped: repeated state)" } else { "" },
                 event.merges_evaluated,
                 stream.leaf_count(),
                 stream.encoded_symbol_bits(),

@@ -4,6 +4,7 @@
 
 use std::cmp::Ordering;
 
+#[derive(Clone)]
 pub struct PackedBitSequence {
     words: Vec<u64>,
     bit_count: u64,

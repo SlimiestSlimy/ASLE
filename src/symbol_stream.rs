@@ -11,13 +11,14 @@
 use crate::fast_hash::FastHashMap;
 use crate::huffman_tree::calculate_encoded_symbol_bits;
 use crate::packed_bit_sequence::PackedBitSequence;
-use crate::predicted_changes::MergePrediction;
+use crate::predicted_changes::{LeafRemovalPrediction, MergePrediction};
 use crate::symbol_definition::SymbolDefinition;
 
 /// Marks a position whose symbol was absorbed into a merge earlier in the
 /// current pass; removed by `remove_vacated_positions`.
 pub const VACATED_POSITION: u32 = u32::MAX;
 
+#[derive(Clone)]
 pub struct SymbolStream {
     pub shared_bit_sequence: PackedBitSequence,
     pub symbol_definitions: Vec<SymbolDefinition>,
@@ -133,6 +134,24 @@ impl SymbolStream {
                 position_consumed_this_pass[position as usize] = true;
             }
         }
+    }
+
+    /// Replaces every placement of the removed leaf with its respelling and
+    /// drops vacated positions. Positions change, so the pass must end.
+    pub fn apply_leaf_removal(&mut self, removal: &LeafRemovalPrediction) {
+        self.symbol_frequencies = removal.symbol_frequencies_after.clone();
+        let mut rebuilt_symbol_ids = Vec::with_capacity(self.placed_symbol_ids.len());
+        for &symbol_id in &self.placed_symbol_ids {
+            if symbol_id == VACATED_POSITION {
+                continue;
+            }
+            if symbol_id as usize == removal.removed_symbol_id {
+                rebuilt_symbol_ids.extend_from_slice(&removal.replacement_symbol_ids);
+            } else {
+                rebuilt_symbol_ids.push(symbol_id);
+            }
+        }
+        self.placed_symbol_ids = rebuilt_symbol_ids;
     }
 
     pub fn remove_vacated_positions(&mut self) {
