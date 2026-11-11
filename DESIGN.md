@@ -164,6 +164,12 @@ tree's own split). Otherwise the remembered side gets the body's **success rate*
 remembered side taken / other side taken, over every node that had a remembered side.
 The counters learn with the dimensional tiler's local decay: +256 to the outcome's
 counter, then each counter loses r · right · wrong / (right + wrong)², rounded down. The
+counters are u32 and stop at 2^32 − 1 as the tiler's do (the user's rule), and both start
+at one step, +1 on each side (the user's rule): the first outcome can't claim certainty, and
+a counter's decay is always less than itself, so neither returns to 0 and the rate is
+never 0 or 1 (25–31 bits a file better than starting at 0, which held the first outcome at
+the limit). The decay alone doesn't bound them: in a long streak the loser decays to a
+floor (68 from one step) and the winner still gains ~189 a hit. The
 rate is kept within [2, 2^32 − 2] / 2^32 so the coder can split it (MINE). After each bit
 the last choice is overwritten. Encoder and decoder hold the same memory, so nothing is stored for it.
 Before the first 3 symbols a start marker stands in for the missing positions (MINE).
@@ -358,9 +364,6 @@ manual) is in the test set for larger runs.
   merge candidates.
 - The body's success counters: one global pair now; per depth, or per (context, node)
   next to the last choice? The text files lost about 1% to the single rate.
-- The counters' cold start: after the first outcome the pair (256, 0) means 100%, held at
-  the limit; a miss there costs about 31 bits (0–6 times a file). Start at one step each
-  way?
 - Packed 5-bit fields lose with Fibonacci sizes through the body, not the builder: the
   2-bit `00` is 59% of the placements, and its contexts repeat.
 

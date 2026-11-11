@@ -30,7 +30,7 @@ use crate::canonical_huffman_code::CanonicalHuffmanDecoder;
 use crate::fast_hash::FastHashMap;
 
 /// What one outcome adds to its counter (the tiler's step: "+256 equals floats").
-const SUCCESS_COUNTER_STEP: u64 = 256;
+const SUCCESS_COUNTER_STEP: u32 = 256;
 const START_MARKER: u32 = u32::MAX;
 
 /// The last 3 placed symbols' positions, oldest first.
@@ -44,36 +44,45 @@ struct LastChoiceMemory {
 }
 
 /// How often the remembered side has been the one taken, over the whole body.
-#[derive(Default)]
+/// u32 counters (the user's rule, 2026-11-11), stopping at 2^32 - 1 as the
+/// tiler's do; a product is widened only while it is computed, as in the
+/// coder's split. Both start at one step, +1 on each side (the user's rule):
+/// the first outcome can't claim certainty, and since a counter's decay is
+/// always less than itself, neither ever returns to 0, so the rate is never
+/// 0 or 1.
 struct RememberedSideSuccessRate {
-    remembered_side_taken: u64,
-    other_side_taken: u64,
+    remembered_side_taken: u32,
+    other_side_taken: u32,
+}
+
+impl Default for RememberedSideSuccessRate {
+    fn default() -> Self {
+        RememberedSideSuccessRate { remembered_side_taken: SUCCESS_COUNTER_STEP, other_side_taken: SUCCESS_COUNTER_STEP }
+    }
 }
 
 impl RememberedSideSuccessRate {
     /// right / (right + wrong) in 2^32 fractions, rounded down; 1/2 before any
     /// outcome. Kept within what the coder can split (MINE): at least
-    /// LEAST_PROBABILITY_OF_A_SIDE for either side.
-    fn probability_of_remembered_side(&self) -> u64 {
-        let outcomes = self.remembered_side_taken + self.other_side_taken;
-        if outcomes == 0 {
-            return PROBABILITY_HALF as u64;
-        }
-        let probability = ((self.remembered_side_taken as u128) << 32) / outcomes as u128;
-        (probability as u64).clamp(LEAST_PROBABILITY_OF_A_SIDE, (1 << 32) - LEAST_PROBABILITY_OF_A_SIDE)
+    /// LEAST_PROBABILITY_OF_A_SIDE for either side (only a guard now).
+    fn probability_of_remembered_side(&self) -> Probability {
+        let outcomes = self.remembered_side_taken as u64 + self.other_side_taken as u64;
+        let probability = ((self.remembered_side_taken as u64) << 32) / outcomes;
+        probability.clamp(LEAST_PROBABILITY_OF_A_SIDE, (1 << 32) - LEAST_PROBABILITY_OF_A_SIDE) as Probability
     }
 
     /// +256 to the outcome's counter, then the local decay.
     fn record(&mut self, remembered_side_was_taken: bool) {
         if remembered_side_was_taken {
-            self.remembered_side_taken += SUCCESS_COUNTER_STEP;
+            self.remembered_side_taken = self.remembered_side_taken.saturating_add(SUCCESS_COUNTER_STEP);
         } else {
-            self.other_side_taken += SUCCESS_COUNTER_STEP;
+            self.other_side_taken = self.other_side_taken.saturating_add(SUCCESS_COUNTER_STEP);
         }
         let (right, wrong) = (self.remembered_side_taken as u128, self.other_side_taken as u128);
         let outcomes_squared = (right + wrong) * (right + wrong);
-        self.remembered_side_taken -= (right * right * wrong / outcomes_squared) as u64;
-        self.other_side_taken -= (right * wrong * wrong / outcomes_squared) as u64;
+        // Each loss is at most its counter / 4, so it fits a u32.
+        self.remembered_side_taken -= (right * right * wrong / outcomes_squared) as u32;
+        self.other_side_taken -= (right * wrong * wrong / outcomes_squared) as u32;
     }
 }
 
@@ -92,8 +101,9 @@ impl LastChoiceMemory {
 fn probability_of_zero(remembered_choice: Option<u8>, success_rate: &RememberedSideSuccessRate) -> Probability {
     match remembered_choice {
         None => PROBABILITY_HALF,
-        Some(0) => success_rate.probability_of_remembered_side() as Probability,
-        Some(_) => ((1u64 << 32) - success_rate.probability_of_remembered_side()) as Probability,
+        Some(0) => success_rate.probability_of_remembered_side(),
+        // 2^32 - p, as a u32: the other side.
+        Some(_) => success_rate.probability_of_remembered_side().wrapping_neg(),
     }
 }
 
