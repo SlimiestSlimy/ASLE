@@ -6,14 +6,15 @@
 //! | code length section (see code_length_section): which Huffman code length
 //!   each symbol has: counts per code length within the range the code tree
 //!   allows, plus one multiset-permutation index
-//! | body: the canonical Huffman code of every placed symbol, in order.
+//! | body (see range_coded_body): every placed symbol's canonical Huffman code,
+//!   range coded bit by bit with an order-3 last-choice memory.
 //!
-//! The code lengths are exactly the ones the builder decides with, so the
-//! body is exactly the encoded symbol bits the builder measured.
+//! The code lengths are exactly the ones the builder decides with.
 
 use crate::bit_io::{BitReader, BitWriter};
 use crate::builder_events::BuilderObserver;
 use crate::canonical_huffman_code::{assign_canonical_codes, CanonicalHuffmanDecoder};
+use crate::range_coded_body::{decode_body, encode_body};
 use crate::code_length_section::{measure_code_length_section_bit_count, read_code_length_section, write_code_length_section};
 use crate::huffman_tree::calculate_code_lengths;
 use crate::packed_bit_sequence::PackedBitSequence;
@@ -101,12 +102,9 @@ pub fn compress_input(
     for (position, &symbol_id) in prefix_tree.symbol_ids_depth_first.iter().enumerate() {
         position_by_symbol_id[symbol_id] = position;
     }
-    for &symbol_id in &stream.placed_symbol_ids {
-        let (code_bits, code_length) = codes_in_order[position_by_symbol_id[symbol_id as usize]];
-        bit_writer.write_bits(code_bits, code_length);
-    }
-    let body_bit_count = bit_writer.bits_written - header_bit_count;
-    assert_eq!(body_bit_count, stream.encoded_symbol_bits(), "body and the builder's encoded symbol bits disagree");
+    let placed_positions = stream.placed_symbol_ids.iter().map(|&symbol_id| position_by_symbol_id[symbol_id as usize]);
+    let body_bit_count = encode_body(&mut bit_writer, placed_positions, &codes_in_order);
+    assert_eq!(bit_writer.bits_written, header_bit_count + body_bit_count, "body bits miscounted");
 
     let mut dictionary: Vec<DictionaryEntry> = prefix_tree
         .symbol_ids_depth_first
@@ -144,9 +142,10 @@ pub fn decompress_container(container_bytes: &[u8]) -> (Vec<u8>, u64) {
     let code_lengths_in_order = read_code_length_section(&mut bit_reader, symbol_definitions_depth_first.len() as u64);
     assert_eq!(code_lengths_in_order.len(), symbol_definitions_depth_first.len(), "code lengths and prefix tree disagree");
     let decoder = CanonicalHuffmanDecoder::from_code_lengths(&code_lengths_in_order);
+    let placed_positions = decode_body(&mut bit_reader, placed_symbol_count, &decoder);
     let mut output_writer = BitWriter::new();
-    for _ in 0..placed_symbol_count {
-        let definition = symbol_definitions_depth_first[decoder.decode_next_position(&mut bit_reader)];
+    for position in placed_positions {
+        let definition = symbol_definitions_depth_first[position];
         decoded_symbol_bits.for_each_chunk(definition.first_bit_offset, definition.bit_length as u64, |chunk, count| {
             output_writer.write_bits(chunk, count)
         });

@@ -76,6 +76,23 @@ impl<'a> BitReader<'a> {
         value
     }
 
+    /// Like read_bits, but bits past the end of the bytes read as 0 (a range
+    /// decoder reads a few bytes ahead of what was written).
+    pub fn read_bits_or_zeros_past_end(&mut self, bit_count: u32) -> u64 {
+        let mut value = 0;
+        for _ in 0..bit_count {
+            let bit = if (self.bit_position >> 3) < self.bytes.len() {
+                let byte = self.bytes[self.bit_position >> 3];
+                ((byte >> (7 - (self.bit_position & 7))) & 1) as u64
+            } else {
+                0
+            };
+            self.bit_position += 1;
+            value = (value << 1) | bit;
+        }
+        value
+    }
+
     pub fn read_elias_gamma(&mut self) -> u64 {
         let mut leading_zeros = 0;
         while self.read_bit() == 0 {

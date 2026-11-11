@@ -1,6 +1,7 @@
 //! ASLE: Arbitrary Symbol Length Encoding. Command-line interface only.
 
 mod big_unsigned_integer;
+mod binary_range_coder;
 mod bit_io;
 mod builder_events;
 mod canonical_huffman_code;
@@ -14,6 +15,7 @@ mod merge_candidates;
 mod multiset_permutation;
 mod option_ranking;
 mod packed_bit_sequence;
+mod range_coded_body;
 mod predicted_changes;
 mod symbol_builder;
 mod symbol_definition;

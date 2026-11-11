@@ -1,7 +1,8 @@
 # ASLE — Arbitrary Symbol Length Encoding
 
 Compresses a bit stream by building a dictionary of symbols of any length up
-to n bits, then encoding the stream of placed symbols with a prefix code.
+to n bits, then encoding the stream of placed symbols with a prefix code whose
+bits are range coded.
 
 **Goal:** the smallest dictionary (fewest leaves) whose symbols still encode
 the whole stream; the encoded symbol bits break ties.
@@ -37,6 +38,9 @@ boundaries.
 | combination index | one number in [0, C(m, k)) saying which k of m nodes are symbols |
 | bit length / code length | bits of input a symbol stands for (from the prefix tree) / bits its Huffman code takes in the body (from the code length section) |
 | multiset-permutation index | one number saying which code length each symbol has, given how many symbols have each code length |
+| code tree node | a place in the canonical Huffman code tree: (depth, code bits on the way to it); each node is one binary choice in the body |
+| order-3 context | the depth-first positions of the last 3 placed symbols |
+| last choice | the side (0 or 1) last taken at a (context, code tree node); one bit of memory, the same in encoder and decoder |
 
 ---
 
@@ -87,7 +91,8 @@ code length section (nothing for a lone symbol: its code is 0, 1 bit):
     multiset-permutation index                     the code lengths in depth-first symbol order,
                                                    ranked among all orderings with those counts;
                                                    exactly enough bits for (orderings − 1)
-body: the canonical Huffman code of every placed symbol
+body: the canonical Huffman code of every placed symbol, range coded bit by bit
+    down the code tree (below), to the end of the stream
 ```
 
 No magic number and no input length: the decoder stops after the placed symbol count, and
@@ -101,8 +106,8 @@ the prefix tree; its **code length** (bits its code takes in the body) depends o
 frequency and comes from the code length section.
 
 Canonical codes are handed out by (code length, depth-first position), a rule rather than
-stored bits. The code lengths are exactly the builder's Huffman lengths, so the body equals
-the encoded symbol bits the builder measured (checked on every run). Symbols with equal code
+stored bits. The code lengths are exactly the builder's Huffman lengths, so before range
+coding the body is exactly the encoded symbol bits the builder measured. Symbols with equal code
 lengths are interchangeable, so the multiset permutation is exactly the information needed.
 
 Alternatives measured (early builder source / binary, bits to link symbols to codes):
@@ -112,9 +117,51 @@ A full permutation also records the order among same-length codes, which changes
 *Replaced:* an order-preserving code tree (Garsia–Wachs), whose body was 0.6–7% longer than
 Huffman's; the multiset permutation won on every test file (binary −3,182 bits).
 
+### Range-coded body (the user's design, 2026-11-10)
+
+Each placed symbol's canonical code is coded one bit at a time, each bit being the choice
+at one code tree node. The prediction for a node comes from the **last choice** taken at
+the same (order-3 context, code tree node): the remembered side gets 3/4, the other 1/4;
+a pair never seen gets 1/2 (the Huffman tree's own split). After each bit the last choice
+is overwritten. Encoder and decoder hold the same memory, so nothing is stored for it.
+Before the first 3 symbols a start marker stands in for the missing positions (MINE).
+
+The coder is an LZMA-style binary range coder, integers only: a 64-bit low end, a 32-bit
+range, carries through a cached byte. A probability is a u32 fraction of 2^32; the split
+is (range × probability) >> 32 in 64 bits. Its first output byte, always 0, is not
+written (MINE); the flush writes 4 more bytes, so the body ends on a byte and tiny inputs
+pay about 32 bits (5 input bits: a 7-byte stream). The decoder reads zeros past the end.
+
 ---
 
 ## Measured history (bytes)
+
+### Range-coded body (n = 16; whole stream in **bits**, lower is better; random is a noise reference, not counted)
+
+Every column is the whole stream (header + body), each decoded back exactly. The counter
+rows were measured on the way and not kept: one counter per node, its value c in
+0..2^w − 1 predicting a 1 with chance (c + 1) / (2^w + 1), starting at 2^(w−1) − 1;
+"±1" steps one toward each bit, "+2/−1" steps 2 on a right prediction, 1 back on a wrong one.
+
+| Body coding | binary | packed 5-bit | Rust source | early builder | **total (4)** | *random* |
+|---|---|---|---|---|---|---|
+| canonical Huffman codes | 51,055 | 42,477 | 97,260 | 44,200 | 234,992 | *79,367* |
+| **last choice 3/4, order 3 (current)** | **46,055** | **43,199** | **79,117** | **39,125** | **207,496** | *83,311* |
+| last choice 2/3, order 3 | 46,983 | 42,263 | 84,061 | 40,485 | 213,792 | *80,919* |
+| 3-bit counters ±1, order 3, one per pair | 45,535 | 42,879 | 80,917 | 39,749 | 209,080 | *83,663* |
+| 2-bit counters ±1 (same as +2/−1), order 3 | 46,327 | 43,559 | 80,957 | 39,901 | 210,744 | *84,447* |
+| 3-bit counters +2/−1, order 3 | 45,959 | 43,823 | 78,677 | 39,061 | 207,520 | *86,215* |
+| 4-bit counters +2/−1, order 3 | 46,951 | 44,031 | 81,237 | 39,797 | 212,016 | *88,127* |
+| the same, hashed into 2^16 counters (splitmix64) | 47,447 | 44,535 | 84,485 | 40,309 | 216,776 | *89,127* |
+| the same, 2^20 counters | 46,975 | 44,087 | 81,461 | 39,845 | 212,368 | *88,199* |
+| the same, order 2 | 48,167 | 45,927 | 76,949 | 38,365 | 209,408 | *93,839* |
+| order 2, 2^20 counters, ±1 | 46,727 | 42,967 | 80,277 | 39,365 | 209,336 | *86,295* |
+
+Text (the two Rust files) wants predictions that commit fast; the binary, the packed fields
+and noise want predictions that stay near 1/2 when the bits disagree. Most (context, node)
+pairs are seen about twice (Rust source: 88,967 node visits over 50,624 pairs), which is
+why a 2^16 table collides (30% of the pairs on the Rust source) and wide counters stay
+near 1/2.
 
 ### Builder versions (n = 16, previous container)
 
@@ -210,7 +257,9 @@ manual) is in the test set for larger runs.
 | `container_format` | the file layout; the only module that knows the header |
 | `symbol_prefix_tree` | describes, measures, writes and reads the symbol set |
 | `code_length_section` | writes and reads which code length each symbol has |
-| `canonical_huffman_code` | canonical codes from code lengths, and decoding |
+| `canonical_huffman_code` | canonical codes from code lengths, and which symbol a code is |
+| `range_coded_body` | the body: code tree choices predicted by the last choice per (context, node) |
+| `binary_range_coder` | integer binary range coder, u32 probabilities |
 | `multiset_permutation` | exact ranking and unranking of multiset permutations |
 | `big_unsigned_integer` | big integers for the combination and permutation indexes |
 | `symbol_builder` | decision loop: window sizes, passes, rounds, commit rules |

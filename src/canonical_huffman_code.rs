@@ -5,8 +5,6 @@
 //! (the prefix tree's depth-first order). Given the same lengths in the same
 //! order, encoder and decoder build the same codes.
 
-use crate::bit_io::BitReader;
-
 /// (code bits, code length) for every position, from the code lengths.
 pub fn assign_canonical_codes(code_lengths: &[u32]) -> Vec<(u64, u32)> {
     let mut positions_in_code_order: Vec<usize> = (0..code_lengths.len()).collect();
@@ -65,17 +63,17 @@ impl CanonicalHuffmanDecoder {
         }
     }
 
-    /// Reads one code; returns the position (symbol index) it stands for.
-    pub fn decode_next_position(&self, bit_reader: &mut BitReader) -> usize {
-        let mut code = 0u64;
-        for length in 1..=self.longest_code_length as usize {
-            code = (code << 1) | bit_reader.read_bit();
-            let count = self.code_count_by_length[length];
-            let first = self.first_code_by_length[length];
-            if count > 0 && code >= first && code - first < count {
-                return self.positions_in_code_order[self.first_index_by_length[length] + (code - first) as usize];
-            }
+    /// The position (symbol index) whose code is `code` of `length` bits, if any.
+    pub fn position_of_code(&self, code: u64, length: u32) -> Option<usize> {
+        if length == 0 || length > self.longest_code_length {
+            return None;
         }
-        panic!("invalid canonical Huffman code");
+        let count = self.code_count_by_length[length as usize];
+        let first = self.first_code_by_length[length as usize];
+        if count > 0 && code >= first && code - first < count {
+            Some(self.positions_in_code_order[self.first_index_by_length[length as usize] + (code - first) as usize])
+        } else {
+            None
+        }
     }
 }
