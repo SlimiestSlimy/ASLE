@@ -41,13 +41,6 @@ impl PackedBitSequence {
         self.bit_count += 1;
     }
 
-    /// Appends the low `bit_count` bits of `value`, most significant first.
-    pub fn push_bits(&mut self, value: u64, bit_count: u32) {
-        for bit_position in (0..bit_count).rev() {
-            self.push_bit((value >> bit_position) & 1);
-        }
-    }
-
     pub fn read_bit(&self, bit_offset: u64) -> u64 {
         let word = self.words[(bit_offset / WORD_BITS) as usize];
         (word >> (WORD_BITS - 1 - bit_offset % WORD_BITS)) & 1

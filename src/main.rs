@@ -1,18 +1,22 @@
 //! ASLE: Arbitrary Symbol Length Encoding. Command-line interface only.
 
+mod big_unsigned_integer;
 mod bit_io;
 mod builder_events;
 mod change_prediction;
+mod code_tree;
 mod container_format;
 mod fast_hash;
 mod huffman_tree;
 mod json_lines_log;
 mod merge_candidates;
 mod option_ranking;
+mod order_preserving_code_tree;
 mod packed_bit_sequence;
 mod predicted_changes;
 mod symbol_builder;
 mod symbol_definition;
+mod symbol_prefix_tree;
 mod symbol_stream;
 
 use builder_events::*;
@@ -112,12 +116,13 @@ fn print_report(
     print_dictionary: bool,
 ) {
     println!(
-        "{input_name}: {} -> {} bytes ({} bits/byte)  header={} body={} bits  leaves={}  build={:.2}s{}",
+        "{input_name}: {} -> {} bytes ({} bits/byte)  header={} body={} bits (huffman body would be {})  leaves={}  build={:.2}s{}",
         input_bytes.len(),
         container_bytes.len(),
         format_ratio(container_bytes.len() as u64 * 8, input_bytes.len() as u64),
         report.header_bit_count,
         report.body_bit_count,
+        report.huffman_encoded_symbol_bits,
         report.dictionary.len(),
         build_seconds,
         decode_seconds.map(|seconds| format!(" decode={seconds:.2}s")).unwrap_or_default()

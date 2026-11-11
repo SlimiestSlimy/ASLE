@@ -1,6 +1,7 @@
 //! An observer that writes every builder event as one JSON object per line.
 //! Every line also carries the state at that moment: leaves, placed symbols,
-//! encoded symbol bits, and the exact header and total bits (measured, never used to decide).
+//! encoded symbol bits (Huffman, as the builder decides), and the exact
+//! container header bits (measured, never used to decide).
 
 use crate::builder_events::*;
 use crate::container_format::measure_header_bit_count;
@@ -23,7 +24,7 @@ impl JsonLinesEncoderLog {
         let header_bit_count = measure_header_bit_count(stream);
         let _ = writeln!(
             self.writer,
-            "{{\"event\":\"{event_name}\",{fields}\"leaves\":{},\"placed_symbols\":{},\"encoded_symbol_bits\":{encoded_symbol_bits},\"header_bits\":{header_bit_count},\"total_bits\":{}}}",
+            "{{\"event\":\"{event_name}\",{fields}\"leaves\":{},\"placed_symbols\":{},\"encoded_symbol_bits\":{encoded_symbol_bits},\"header_bits\":{header_bit_count},\"encoded_symbol_bits_plus_header_bits\":{}}}",
             stream.leaf_count(),
             stream.occupied_position_count(),
             encoded_symbol_bits + header_bit_count
