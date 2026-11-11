@@ -71,16 +71,14 @@ impl BuilderObserver for CommandLineObserver {
     fn on_window_size_finished(&mut self, event: &WindowSizeFinished, stream: &SymbolStream) {
         if self.print_window_size_summaries {
             eprintln!(
-                "  window={:2} passes={:3} merges={:5} parts_deleted={:4} most_parts={:2} options_evaluated={:7} leaves={:5} encoded_symbol_bits={}{}",
+                "  window={:3} passes={:3} merges={:5} merges_evaluated={:7} leaves={:5} encoded_symbol_bits={} ms={}",
                 event.window_bit_length,
                 event.passes,
                 event.merges_committed,
-                event.parts_deleted,
-                event.most_parts_in_one_candidate,
-                event.options_evaluated,
+                event.merges_evaluated,
                 stream.leaf_count(),
                 stream.encoded_symbol_bits(),
-                if event.stopped_by_repeated_state { "  (stopped: repeated state)" } else { "" }
+                event.elapsed_milliseconds
             );
         }
         if let Some(log) = self.json_lines_log.as_mut() {

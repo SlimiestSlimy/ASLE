@@ -16,14 +16,9 @@ pub struct RoundAnalyzed {
     pub window_bit_length: u32,
     pub pass_number: u32,
     pub round_number: u32,
-    pub option_count: usize,
-    pub best_options_with_deletion: usize,
+    pub merges_ranked: usize,
     pub candidates_dropped_for_single_occurrence: u64,
-    pub merges_that_shrink_alone: u64,
-    pub deletion_subsets_tried: u64,
-    pub deletion_subsets_unspellable: u64,
-    pub deletion_subsets_not_shrinking: u64,
-    pub deletion_subsets_shrinking: u64,
+    pub merges_that_lower_the_leaf_count: u64,
 }
 
 pub enum RejectionReason {
@@ -42,13 +37,11 @@ pub struct MergeRejected {
     pub reason: RejectionReason,
     pub merged_code_bits_after: u64,
     pub consumed_code_bits_before: u64,
-    pub symbols_its_deletion_would_remove: usize,
 }
 
 pub enum CommitKind {
     Merge,
-    MergeThatShrinksAlone,
-    MergeWithDeletion,
+    MergeThatLowersTheLeafCount,
 }
 
 pub struct ConsumedPart {
@@ -57,14 +50,8 @@ pub struct ConsumedPart {
     pub frequency_after_merge: u64,
 }
 
-pub struct RespellingRecord {
-    pub deleted_symbol_id: usize,
-    pub deleted_frequency: u64,
-    pub replacement_symbol_ids: Vec<u32>,
-}
-
-/// Everything about one committed change. Symbol ids refer to the stream as
-/// it is after the change (ids are never reused, so they stay valid).
+/// Everything about one committed merge. Symbol ids refer to the stream as
+/// it is after the merge (ids are never reused, so they stay valid).
 pub struct ChangeCommitted {
     pub window_bit_length: u32,
     pub pass_number: u32,
@@ -78,27 +65,19 @@ pub struct ChangeCommitted {
     pub merged_code_bits_after: u64,
     pub consumed_code_bits_before: u64,
     pub score_numerator: i128,
-    pub score_denominator: i128,
     pub encoded_symbol_bits_before: u64,
-    pub encoded_symbol_bits_after_merge: u64,
-    pub encoded_symbol_bits_final: u64,
+    pub encoded_symbol_bits_after: u64,
     pub leaves_before: usize,
     pub removed_leaf_ids: Vec<usize>,
     pub added_leaf_ids: Vec<usize>,
-    pub revived_symbol_count: usize,
-    pub respellings: Vec<RespellingRecord>,
     pub placed_symbols_before: usize,
-    pub consumed_placements_from_respelling: usize,
 }
 
 pub struct WindowSizeFinished {
     pub window_bit_length: u32,
     pub passes: u32,
     pub merges_committed: u32,
-    pub parts_deleted: u32,
-    pub options_evaluated: u64,
-    pub most_parts_in_one_candidate: u32,
-    pub stopped_by_repeated_state: bool,
+    pub merges_evaluated: u64,
     pub elapsed_milliseconds: u128,
 }
 

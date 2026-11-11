@@ -7,7 +7,7 @@
 
 use crate::fast_hash::FastHashMap;
 use crate::huffman_tree::calculate_encoded_symbol_bits;
-use crate::predicted_changes::{DeletionPrediction, MergePrediction};
+use crate::predicted_changes::MergePrediction;
 use crate::symbol_definition::SymbolDefinition;
 
 /// Marks a position whose symbol was absorbed into a merge earlier in the
@@ -18,9 +18,6 @@ pub struct SymbolStream {
     pub symbol_definitions: Vec<SymbolDefinition>,
     pub symbol_frequencies: Vec<u64>,
     pub placed_symbol_ids: Vec<u32>,
-    /// Measurement only: parallel to placed_symbol_ids, true where the placed
-    /// symbol was produced by a respelling (never read by any decision).
-    pub placed_by_respelling: Vec<bool>,
     /// n: the largest window size, and so the longest possible symbol.
     pub maximum_symbol_bit_length: u32,
     pub input_bit_count: u64,
@@ -52,7 +49,6 @@ impl SymbolStream {
         SymbolStream {
             symbol_definitions: vec![zero, one],
             symbol_frequencies: vec![zero_count, one_count],
-            placed_by_respelling: vec![false; placed_symbol_ids.len()],
             placed_symbol_ids,
             maximum_symbol_bit_length,
             input_bit_count: input_bytes.len() as u64 * 8,
@@ -93,7 +89,6 @@ impl SymbolStream {
         self.symbol_frequencies = merge.symbol_frequencies_after.clone();
         for &(start_position, end_position) in &merge.merged_occurrence_ranges {
             self.placed_symbol_ids[start_position as usize] = merge.merged_symbol_id as u32;
-            self.placed_by_respelling[start_position as usize] = false;
             position_consumed_this_pass[start_position as usize] = true;
             for position in start_position + 1..end_position {
                 self.placed_symbol_ids[position as usize] = VACATED_POSITION;
@@ -102,45 +97,14 @@ impl SymbolStream {
         }
     }
 
-    /// Replaces every placement of each deleted symbol with its respelling,
-    /// and drops vacated positions. Positions change, so the pass must end.
-    pub fn apply_deletion(&mut self, deletion: &DeletionPrediction) {
-        self.symbol_frequencies = deletion.symbol_frequencies_after.clone();
-        let mut rebuilt_symbol_ids = Vec::with_capacity(self.placed_symbol_ids.len());
-        let mut rebuilt_respelling_marks = Vec::with_capacity(self.placed_symbol_ids.len());
-        for (position, &symbol_id) in self.placed_symbol_ids.iter().enumerate() {
-            if symbol_id == VACATED_POSITION {
-                continue;
-            }
-            let respelling = deletion
-                .respellings
-                .iter()
-                .find(|respelling| respelling.deleted_symbol_id == symbol_id as usize);
-            match respelling {
-                Some(respelling) => {
-                    rebuilt_symbol_ids.extend_from_slice(&respelling.replacement_symbol_ids);
-                    rebuilt_respelling_marks.extend(std::iter::repeat(true).take(respelling.replacement_symbol_ids.len()));
-                }
-                None => {
-                    rebuilt_symbol_ids.push(symbol_id);
-                    rebuilt_respelling_marks.push(self.placed_by_respelling[position]);
-                }
-            }
-        }
-        self.placed_symbol_ids = rebuilt_symbol_ids;
-        self.placed_by_respelling = rebuilt_respelling_marks;
-    }
-
     pub fn remove_vacated_positions(&mut self) {
         let mut kept_count = 0;
         for position in 0..self.placed_symbol_ids.len() {
             if self.placed_symbol_ids[position] != VACATED_POSITION {
                 self.placed_symbol_ids[kept_count] = self.placed_symbol_ids[position];
-                self.placed_by_respelling[kept_count] = self.placed_by_respelling[position];
                 kept_count += 1;
             }
         }
         self.placed_symbol_ids.truncate(kept_count);
-        self.placed_by_respelling.truncate(kept_count);
     }
 }

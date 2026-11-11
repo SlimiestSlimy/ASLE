@@ -58,18 +58,13 @@ impl BuilderObserver for JsonLinesEncoderLog {
 
     fn on_round_analyzed(&mut self, event: &RoundAnalyzed, stream: &SymbolStream) {
         let fields = format!(
-            "\"window_bit_length\":{},\"pass\":{},\"round\":{},\"options\":{},\"best_options_with_deletion\":{},\"candidates_dropped_for_single_occurrence\":{},\"merges_that_shrink_alone\":{},\"deletion_subsets_tried\":{},\"deletion_subsets_unspellable\":{},\"deletion_subsets_not_shrinking\":{},\"deletion_subsets_shrinking\":{},",
+            "\"window_bit_length\":{},\"pass\":{},\"round\":{},\"merges_ranked\":{},\"candidates_dropped_for_single_occurrence\":{},\"merges_that_lower_the_leaf_count\":{},",
             event.window_bit_length,
             event.pass_number,
             event.round_number,
-            event.option_count,
-            event.best_options_with_deletion,
+            event.merges_ranked,
             event.candidates_dropped_for_single_occurrence,
-            event.merges_that_shrink_alone,
-            event.deletion_subsets_tried,
-            event.deletion_subsets_unspellable,
-            event.deletion_subsets_not_shrinking,
-            event.deletion_subsets_shrinking
+            event.merges_that_lower_the_leaf_count
         );
         self.write_line("round_analyzed", fields, stream);
     }
@@ -79,7 +74,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
             RejectionReason::MergedCodeNotShorter => "merged_code_not_shorter",
         };
         let fields = format!(
-            "\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"symbol\":\"{}\",\"frequency\":{},\"reason\":\"{reason}\",\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},\"symbols_its_deletion_would_remove\":{},",
+            "\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"symbol\":\"{}\",\"frequency\":{},\"reason\":\"{reason}\",\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},",
             event.window_bit_length,
             event.pass_number,
             event.round_number,
@@ -87,8 +82,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
             event.merged_definition.as_bit_string(),
             event.frequency,
             event.merged_code_bits_after,
-            event.consumed_code_bits_before,
-            event.symbols_its_deletion_would_remove
+            event.consumed_code_bits_before
         );
         self.write_line("merge_rejected", fields, stream);
     }
@@ -97,8 +91,7 @@ impl BuilderObserver for JsonLinesEncoderLog {
         self.commit_number += 1;
         let kind = match event.kind {
             CommitKind::Merge => "merge",
-            CommitKind::MergeThatShrinksAlone => "merge_that_shrinks_alone",
-            CommitKind::MergeWithDeletion => "merge_with_deletion",
+            CommitKind::MergeThatLowersTheLeafCount => "merge_that_lowers_the_leaf_count",
         };
         let consumed_parts = event
             .consumed_parts
@@ -113,21 +106,8 @@ impl BuilderObserver for JsonLinesEncoderLog {
             })
             .collect::<Vec<_>>()
             .join(",");
-        let respellings = event
-            .respellings
-            .iter()
-            .map(|respelling| {
-                format!(
-                    "{{\"deleted_symbol\":\"{}\",\"deleted_frequency\":{},\"respelled_as\":[{}]}}",
-                    stream_after.symbol_as_bit_string(respelling.deleted_symbol_id),
-                    respelling.deleted_frequency,
-                    quoted_symbol_names(stream_after, respelling.replacement_symbol_ids.iter().map(|&id| id as usize))
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
         let fields = format!(
-            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"kind\":\"{kind}\",\"symbol\":\"{}\",\"symbol_is_new\":{},\"frequency\":{},\"consumed_parts\":[{consumed_parts}],\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},\"score_numerator\":{},\"score_denominator\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after_merge\":{},\"encoded_symbol_bits_final\":{},\"leaves_before\":{},\"removed_leaves\":[{}],\"added_leaves\":[{}],\"revived_symbols\":{},\"respellings\":[{respellings}],\"placed_symbols_before\":{},\"consumed_placements_from_respelling\":{},",
+            "\"commit_number\":{},\"window_bit_length\":{},\"pass\":{},\"round\":{},\"rank_position\":{},\"kind\":\"{kind}\",\"symbol\":\"{}\",\"symbol_is_new\":{},\"frequency\":{},\"consumed_parts\":[{consumed_parts}],\"merged_code_bits_after\":{},\"consumed_code_bits_before\":{},\"score_numerator\":{},\"encoded_symbol_bits_before\":{},\"encoded_symbol_bits_after\":{},\"leaves_before\":{},\"removed_leaves\":[{}],\"added_leaves\":[{}],\"placed_symbols_before\":{},",
             self.commit_number,
             event.window_bit_length,
             event.pass_number,
@@ -139,31 +119,20 @@ impl BuilderObserver for JsonLinesEncoderLog {
             event.merged_code_bits_after,
             event.consumed_code_bits_before,
             event.score_numerator,
-            event.score_denominator,
             event.encoded_symbol_bits_before,
-            event.encoded_symbol_bits_after_merge,
-            event.encoded_symbol_bits_final,
+            event.encoded_symbol_bits_after,
             event.leaves_before,
             quoted_symbol_names(stream_after, event.removed_leaf_ids.iter().copied()),
             quoted_symbol_names(stream_after, event.added_leaf_ids.iter().copied()),
-            event.revived_symbol_count,
-            event.placed_symbols_before,
-            event.consumed_placements_from_respelling
+            event.placed_symbols_before
         );
         self.write_line("change_committed", fields, stream_after);
     }
 
     fn on_window_size_finished(&mut self, event: &WindowSizeFinished, stream: &SymbolStream) {
         let fields = format!(
-            "\"window_bit_length\":{},\"passes\":{},\"merges_committed\":{},\"parts_deleted\":{},\"options_evaluated\":{},\"most_parts_in_one_candidate\":{},\"stopped_by_repeated_state\":{},\"elapsed_milliseconds\":{},",
-            event.window_bit_length,
-            event.passes,
-            event.merges_committed,
-            event.parts_deleted,
-            event.options_evaluated,
-            event.most_parts_in_one_candidate,
-            event.stopped_by_repeated_state,
-            event.elapsed_milliseconds
+            "\"window_bit_length\":{},\"passes\":{},\"merges_committed\":{},\"merges_evaluated\":{},\"elapsed_milliseconds\":{},",
+            event.window_bit_length, event.passes, event.merges_committed, event.merges_evaluated, event.elapsed_milliseconds
         );
         self.write_line("window_size_finished", fields, stream);
     }
