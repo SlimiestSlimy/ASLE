@@ -19,12 +19,12 @@ def read_commit_points(log_path):
             commit_points.append({
                 "commit_number": 0, "window_bit_length": 0, "kind": "start", "symbol": "",
                 "leaves": event["leaves"], "encoded_symbol_bits": event["encoded_symbol_bits"],
-                "header_bits": event["header_bits"], "total_bits": event["total_bits"],
+                "header_bits": event["header_bits"], "encoded_symbol_bits_plus_header_bits": event["encoded_symbol_bits_plus_header_bits"],
             })
         elif event["event"] == "change_committed":
             commit_points.append({key: event[key] for key in (
                 "commit_number", "window_bit_length", "kind", "symbol", "leaves",
-                "encoded_symbol_bits", "header_bits", "total_bits")})
+                "encoded_symbol_bits", "header_bits", "encoded_symbol_bits_plus_header_bits")})
     return commit_points
 
 
@@ -54,7 +54,7 @@ const panels = [
   ["leaves", "Leaves (dictionary size)"],
   ["encoded_symbol_bits", "Encoded symbol bits"],
   ["header_bits", "Header bits (measured only)"],
-  ["total_bits", "Total bits (encoded symbols + header)"],
+  ["encoded_symbol_bits_plus_header_bits", "Total bits (encoded symbols + header)"],
 ];
 const width = 960, height = 170, marginLeft = 64, marginRight = 12, marginTop = 10, marginBottom = 22;
 const lastCommit = points[points.length - 1].commit_number || 1;
@@ -110,7 +110,7 @@ for (const [key, title] of panels) {
     tooltip.innerHTML = `commit ${p.commit_number} · window ${p.window_bit_length} · ${p.kind}<br>` +
       (p.symbol ? `symbol ${p.symbol}<br>` : "") +
       `leaves ${p.leaves.toLocaleString()} · encoded symbol bits ${p.encoded_symbol_bits.toLocaleString()}<br>` +
-      `header ${p.header_bits.toLocaleString()} · total ${p.total_bits.toLocaleString()}`;
+      `header ${p.header_bits.toLocaleString()} · total ${p.encoded_symbol_bits_plus_header_bits.toLocaleString()}`;
   });
   svg.addEventListener("mouseleave", () => { tooltip.style.display = "none"; for (const c of crosshairs) c.setAttribute("visibility", "hidden"); });
 }
