@@ -26,7 +26,7 @@ use symbol_stream::SymbolStream;
 use std::time::Instant;
 
 const USAGE: &str = "usage:
-  asle compress   <input> <output> --max-symbol-bits <n> [--verbose] [--log <file.jsonl>]
+  asle compress   <input> <output> --max-symbol-bits <n> [--verbose] [--log <file.jsonl>] [--dictionary <file.csv>]
   asle decompress <input> <output>
   asle benchmark  --max-symbol-bits <n> [--verbose] <files...>";
 
@@ -97,6 +97,17 @@ impl BuilderObserver for CommandLineObserver {
     }
 }
 
+/// Every final symbol, most frequent first: bit length, frequency, code length, bits.
+fn write_dictionary_csv(path: &str, report: &CompressionReport) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(writer, "bit_length,frequency,code_length,bits")?;
+    for entry in &report.dictionary {
+        writeln!(writer, "{},{},{},{}", entry.bit_length, entry.frequency, entry.code_length, entry.bit_string)?;
+    }
+    writer.flush()
+}
+
 /// Integer "x.yyy" formatting of numerator / denominator.
 fn format_ratio(numerator: u64, denominator: u64) -> String {
     if denominator == 0 {
@@ -164,6 +175,7 @@ fn main() {
     let mut maximum_symbol_bit_length: Option<u32> = None;
     let mut verbose = false;
     let mut log_path: Option<String> = None;
+    let mut dictionary_path: Option<String> = None;
     let mut positional_arguments: Vec<String> = Vec::new();
     let mut argument_index = 2;
     while argument_index < arguments.len() {
@@ -174,6 +186,10 @@ fn main() {
                     Some(arguments.get(argument_index).and_then(|text| text.parse().ok()).unwrap_or_else(|| exit_with_usage()));
             }
             "--verbose" => verbose = true,
+            "--dictionary" => {
+                argument_index += 1;
+                dictionary_path = Some(arguments.get(argument_index).cloned().unwrap_or_else(|| exit_with_usage()));
+            }
             "--log" => {
                 argument_index += 1;
                 log_path = Some(arguments.get(argument_index).cloned().unwrap_or_else(|| exit_with_usage()));
@@ -197,6 +213,9 @@ fn main() {
             let (container_bytes, report) = compress_input(&input_bytes, maximum_symbol_bit_length, &mut observer);
             let build_seconds = build_start.elapsed().as_secs_f64();
             std::fs::write(output_path, &container_bytes).expect("could not write output");
+            if let Some(path) = dictionary_path {
+                write_dictionary_csv(&path, &report).expect("could not write dictionary file");
+            }
             print_report(input_path, &input_bytes, &container_bytes, &report, build_seconds, None, verbose);
         }
         "decompress" => {
