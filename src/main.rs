@@ -1,4 +1,4 @@
-//! ASLE: Arbitrary Symbol Length Encoding. Command-line interface only.
+//! VaSyLeRE: Variable Symbol Length Ranged Encoder. Command-line interface only.
 
 mod big_unsigned_integer;
 mod binary_range_coder;
@@ -12,6 +12,7 @@ mod fast_hash;
 mod huffman_tree;
 mod json_lines_log;
 mod leaf_counts_by_weight;
+mod symbol_bit_trie;
 mod merge_candidates;
 mod multiset_permutation;
 mod option_ranking;
@@ -30,9 +31,14 @@ use symbol_stream::SymbolStream;
 use std::time::Instant;
 
 const USAGE: &str = "usage:
-  asle compress   <input> <output> --max-symbol-bits <n> [--input-bits <count>] [--verbose] [--log <file.jsonl>] [--dictionary <file.csv>]
-  asle decompress <input> <output>
-  asle benchmark  --max-symbol-bits <n> [--verbose] <files...>";
+  vasylere compress   <input> <output> --max-symbol-bits <n> [--min-symbol-bits <m>] [--input-bits <count>] [--verbose] [--log <file.jsonl>] [--dictionary <file.csv>]
+  vasylere decompress <input> <output>
+  vasylere benchmark  --max-symbol-bits <n> [--min-symbol-bits <m>] [--verbose] <files...>
+  m is the smallest window size (default 2): window sizes are the Fibonacci numbers from m to n.";
+
+/// Without --min-symbol-bits every window size from 2 is searched (the user's
+/// choice, 2026-11-12: the behavior before m existed).
+const DEFAULT_MINIMUM_WINDOW_BIT_LENGTH: u32 = 2;
 
 fn exit_with_usage() -> ! {
     eprintln!("{USAGE}");
@@ -190,6 +196,7 @@ fn main() {
         exit_with_usage();
     }
     let mut maximum_symbol_bit_length: Option<u32> = None;
+    let mut minimum_window_bit_length = DEFAULT_MINIMUM_WINDOW_BIT_LENGTH;
     let mut verbose = false;
     let mut log_path: Option<String> = None;
     let mut dictionary_path: Option<String> = None;
@@ -202,6 +209,11 @@ fn main() {
                 argument_index += 1;
                 maximum_symbol_bit_length =
                     Some(arguments.get(argument_index).and_then(|text| text.parse().ok()).unwrap_or_else(|| exit_with_usage()));
+            }
+            "--min-symbol-bits" => {
+                argument_index += 1;
+                minimum_window_bit_length =
+                    arguments.get(argument_index).and_then(|text| text.parse().ok()).unwrap_or_else(|| exit_with_usage());
             }
             "--verbose" => verbose = true,
             "--input-bits" => {
@@ -235,7 +247,7 @@ fn main() {
             let mut observer = CommandLineObserver { print_window_size_summaries: verbose, json_lines_log };
             let build_start = Instant::now();
             let (container_bytes, report) =
-                compress_input(&input_bytes, input_bit_count, maximum_symbol_bit_length, &mut observer);
+                compress_input(&input_bytes, input_bit_count, minimum_window_bit_length, maximum_symbol_bit_length, &mut observer);
             let build_seconds = build_start.elapsed().as_secs_f64();
             std::fs::write(output_path, &container_bytes).expect("could not write output");
             if let Some(path) = dictionary_path {
@@ -257,7 +269,7 @@ fn main() {
                 let mut observer = CommandLineObserver { print_window_size_summaries: verbose, json_lines_log: None };
                 let build_start = Instant::now();
                 let (container_bytes, report) =
-                    compress_input(&input_bytes, input_bit_count, maximum_symbol_bit_length, &mut observer);
+                    compress_input(&input_bytes, input_bit_count, minimum_window_bit_length, maximum_symbol_bit_length, &mut observer);
                 let build_seconds = build_start.elapsed().as_secs_f64();
                 let decode_start = Instant::now();
                 let (decoded_bytes, decoded_bit_count) = decompress_container(&container_bytes);

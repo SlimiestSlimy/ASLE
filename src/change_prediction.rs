@@ -6,7 +6,7 @@
 //! before each candidate (no trees: see leaf_counts_by_weight).
 
 use crate::huffman_tree::calculate_code_lengths;
-use crate::leaf_counts_by_weight::LeafCountsByWeight;
+use crate::leaf_counts_by_weight::{LeafCountsByWeight, MergedRunsBuffer};
 use crate::predicted_changes::{
     count_into_frequency_changes, FrequencyChange, LeafRemovalPrediction, MergePrediction, OccurrenceRange,
 };
@@ -33,16 +33,44 @@ pub fn list_leaves_removed_and_added(frequencies_before: &[u64], changes: &[Freq
 }
 
 /// Predicts replacing each of `merged_occurrence_ranges` with one symbol.
+/// The buffers a candidate is tried on, reused from candidate to candidate so
+/// predicting allocates only what the prediction keeps (MINE): a copy of the
+/// stream's leaf counts, refreshed before every candidate; the two-queue
+/// total's second queue; the symbol ids a change consumes or adds.
+pub struct PredictionBuffers {
+    leaf_counts: LeafCountsByWeight,
+    merged_runs: MergedRunsBuffer,
+    symbol_ids: Vec<u32>,
+}
+
+impl PredictionBuffers {
+    pub fn new(stream: &SymbolStream) -> Self {
+        PredictionBuffers {
+            leaf_counts: stream.leaf_counts_by_weight().clone(),
+            merged_runs: MergedRunsBuffer::default(),
+            symbol_ids: Vec::new(),
+        }
+    }
+
+    /// The stream's leaf counts with `changes` applied: (encoded symbol bits, leaves).
+    fn total_after(&mut self, stream: &SymbolStream, changes: &[FrequencyChange]) -> (u64, usize) {
+        self.leaf_counts.clone_from(stream.leaf_counts_by_weight());
+        self.leaf_counts.apply_frequency_changes(changes, &stream.symbol_frequencies);
+        (self.leaf_counts.encoded_symbol_bits_reusing(&mut self.merged_runs), self.leaf_counts.leaf_count())
+    }
+}
+
 pub fn predict_merge(
     stream: &SymbolStream,
-    working_leaf_counts: &mut LeafCountsByWeight,
+    prediction_buffers: &mut PredictionBuffers,
     candidate_index: usize,
     merged_definition: SymbolDefinition,
     merged_occurrence_ranges: Vec<OccurrenceRange>,
     code_lengths_before: &[u32],
 ) -> MergePrediction {
     let merged_symbol_id = stream.find_symbol_id(merged_definition).unwrap_or(stream.symbol_definitions.len());
-    let mut consumed_symbol_ids = Vec::new();
+    let consumed_symbol_ids = &mut prediction_buffers.symbol_ids;
+    consumed_symbol_ids.clear();
     let mut consumed_code_bits_before = 0u64;
     for &(start_position, end_position) in &merged_occurrence_ranges {
         for position in start_position..end_position {
@@ -59,10 +87,7 @@ pub fn predict_merge(
         delta: merged_occurrence_ranges.len() as i64,
     });
     frequency_changes.sort_unstable_by_key(|change| change.symbol_id);
-    working_leaf_counts.clone_from(stream.leaf_counts_by_weight());
-    working_leaf_counts.apply_frequency_changes(&frequency_changes, &stream.symbol_frequencies);
-    let encoded_symbol_bits_after = working_leaf_counts.encoded_symbol_bits();
-    let leaves_after = working_leaf_counts.leaf_count();
+    let (encoded_symbol_bits_after, leaves_after) = prediction_buffers.total_after(stream, &frequency_changes);
     MergePrediction {
         candidate_index,
         merged_definition,
@@ -122,14 +147,12 @@ pub fn respell_with_fewest_code_bits(stream: &SymbolStream, symbol_id: usize, co
     let mut best_from_bit: Vec<Option<((u64, u32), u32)>> = vec![None; bit_length + 1];
     best_from_bit[bit_length] = Some(((0, 0), 0));
     for start_bit in (0..bit_length).rev() {
-        for piece_bit_length in 1..=bit_length - start_bit {
-            let piece = SymbolDefinition {
-                first_bit_offset: definition.first_bit_offset + start_bit as u64,
-                bit_length: piece_bit_length as u32,
-            };
-            let Some(piece_symbol_id) = stream.find_symbol_id(piece) else { continue };
+        // Every symbol spelling the bits from start_bit on, shortest first.
+        let first_bit_offset = definition.first_bit_offset + start_bit as u64;
+        stream.for_each_symbol_starting_at(first_bit_offset, (bit_length - start_bit) as u32, |piece_bit_length, piece_symbol_id| {
+            let (piece_bit_length, piece_symbol_id) = (piece_bit_length as usize, piece_symbol_id as usize);
             if piece_symbol_id == symbol_id || stream.symbol_frequencies[piece_symbol_id] == 0 {
-                continue;
+                return;
             }
             if let Some(((code_bits_after, pieces_after), _)) = best_from_bit[start_bit + piece_bit_length] {
                 let cost = (code_bits_after + code_lengths[piece_symbol_id] as u64, pieces_after + 1);
@@ -137,7 +160,7 @@ pub fn respell_with_fewest_code_bits(stream: &SymbolStream, symbol_id: usize, co
                     best_from_bit[start_bit] = Some((cost, piece_symbol_id as u32));
                 }
             }
-        }
+        });
     }
     best_from_bit[0]?;
     let mut replacement_symbol_ids = Vec::new();
@@ -153,19 +176,18 @@ pub fn respell_with_fewest_code_bits(stream: &SymbolStream, symbol_id: usize, co
 /// Predicts removing `symbol_id`; None if it cannot be respelled.
 pub fn predict_leaf_removal(
     stream: &SymbolStream,
-    working_leaf_counts: &mut LeafCountsByWeight,
+    prediction_buffers: &mut PredictionBuffers,
     symbol_id: usize,
     code_lengths_before: &[u32],
 ) -> Option<LeafRemovalPrediction> {
     let replacement_symbol_ids = respell_with_fewest_code_bits(stream, symbol_id, code_lengths_before)?;
     let removed_frequency = stream.symbol_frequencies[symbol_id];
     let mut frequency_changes = vec![FrequencyChange { symbol_id: symbol_id as u32, delta: -(removed_frequency as i64) }];
-    count_into_frequency_changes(replacement_symbol_ids.clone(), removed_frequency as i64, &mut frequency_changes);
+    prediction_buffers.symbol_ids.clear();
+    prediction_buffers.symbol_ids.extend_from_slice(&replacement_symbol_ids);
+    count_into_frequency_changes(&mut prediction_buffers.symbol_ids, removed_frequency as i64, &mut frequency_changes);
     frequency_changes.sort_unstable_by_key(|change| change.symbol_id);
-    working_leaf_counts.clone_from(stream.leaf_counts_by_weight());
-    working_leaf_counts.apply_frequency_changes(&frequency_changes, &stream.symbol_frequencies);
-    let encoded_symbol_bits_after = working_leaf_counts.encoded_symbol_bits();
-    let leaves_after = working_leaf_counts.leaf_count();
+    let (encoded_symbol_bits_after, leaves_after) = prediction_buffers.total_after(stream, &frequency_changes);
     Some(LeafRemovalPrediction {
         removed_symbol_id: symbol_id,
         removed_frequency,

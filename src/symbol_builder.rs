@@ -35,12 +35,11 @@
 
 use crate::builder_events::*;
 use crate::change_prediction::{
-    code_bits_after_changes, find_non_saving_leaves, list_leaves_removed_and_added,
+    code_bits_after_changes, PredictionBuffers, find_non_saving_leaves, list_leaves_removed_and_added,
     predict_leaf_removal, predict_merge,
 };
 use crate::merge_candidates::{find_merge_candidates, select_most_non_overlapping_occurrences, MergeCandidate};
 use crate::option_ranking::{calculate_score_numerator, compare_by_rank};
-use crate::leaf_counts_by_weight::LeafCountsByWeight;
 use crate::predicted_changes::{frequency_after_changes, LeafRemovalPrediction, MergePrediction};
 use crate::symbol_stream::SymbolStream;
 use std::cmp::Ordering;
@@ -51,11 +50,13 @@ use std::time::Instant;
 /// the largest one not above n (the user's design, 2026-11-11): far fewer
 /// window sizes, and each is the sum of the two before it, so one symbol of
 /// each of the two previous sizes fills a window exactly.
-fn fibonacci_window_sizes(maximum_symbol_bit_length: u32) -> Vec<u32> {
+fn fibonacci_window_sizes(minimum_window_bit_length: u32, maximum_symbol_bit_length: u32) -> Vec<u32> {
     let mut window_sizes = Vec::new();
     let (mut current, mut next) = (2u32, 3u32);
     while current <= maximum_symbol_bit_length {
-        window_sizes.push(current);
+        if current >= minimum_window_bit_length {
+            window_sizes.push(current);
+        }
         (current, next) = (next, current + next);
     }
     window_sizes
@@ -64,7 +65,7 @@ fn fibonacci_window_sizes(maximum_symbol_bit_length: u32) -> Vec<u32> {
 pub fn build_symbol_dictionary(stream: &mut SymbolStream, observer: &mut dyn BuilderObserver) {
     let build_start = Instant::now();
     observer.on_build_started(stream);
-    for window_bit_length in fibonacci_window_sizes(stream.maximum_symbol_bit_length) {
+    for window_bit_length in fibonacci_window_sizes(stream.minimum_window_bit_length, stream.maximum_symbol_bit_length) {
         observer.on_window_size_started(window_bit_length, stream);
         let summary = run_window_size(stream, window_bit_length, observer);
         observer.on_window_size_finished(&summary, stream);
@@ -143,8 +144,9 @@ fn run_pass(
         round_number += 1;
         let encoded_symbol_bits_before = stream.encoded_symbol_bits();
         let code_lengths_before = stream.code_lengths_by_symbol_id();
-        // Candidates are tried on this copy of the up-to-date leaf counts, refreshed before each.
-        let mut working_leaf_counts = stream.leaf_counts_by_weight().clone();
+        // Candidates are tried on these buffers (a copy of the up-to-date leaf
+        // counts, refreshed before each, and reused buffers).
+        let mut prediction_buffers = PredictionBuffers::new(stream);
         let context = RoundContext {
             window_bit_length,
             pass_number: summary.passes,
@@ -153,14 +155,14 @@ fn run_pass(
             code_lengths_before,
             leaves_before: stream.leaf_count(),
         };
-        if let Some(removal) = find_single_placement_leaf_to_remove(stream, &mut working_leaf_counts, &context) {
+        if let Some(removal) = find_single_placement_leaf_to_remove(stream, &mut prediction_buffers, &context) {
             report_and_apply_leaf_removal(stream, removal, &context, 0, true, observer);
             summary.leaves_removed += 1;
             summary.single_placement_leaves_removed += 1;
             // Positions changed; the candidates are stale. The next pass rescans.
             return changes_committed + 1;
         }
-        let mut removal_scan = find_leaf_to_remove(stream, &mut working_leaf_counts, &context);
+        let mut removal_scan = find_leaf_to_remove(stream, &mut prediction_buffers, &context);
         if let Some(removal) = removal_scan.removal.take() {
             report_and_apply_leaf_removal(stream, removal, &context, removal_scan.non_saving_leaves, false, observer);
             summary.leaves_removed += 1;
@@ -169,7 +171,7 @@ fn run_pass(
         }
         let ranked_merges = predict_and_rank_merges(
             stream,
-            &mut working_leaf_counts,
+            &mut prediction_buffers,
             &merge_candidates,
             &context,
             &removal_scan,
@@ -226,7 +228,7 @@ fn leaf_removal_lowers_encoded_symbol_bits(removal: &LeafRemovalPrediction, cont
 /// that can be respelled with other live leaves.
 fn find_single_placement_leaf_to_remove(
     stream: &SymbolStream,
-    working_leaf_counts: &mut LeafCountsByWeight,
+    prediction_buffers: &mut PredictionBuffers,
     context: &RoundContext,
 ) -> Option<LeafRemovalPrediction> {
     stream
@@ -234,14 +236,14 @@ fn find_single_placement_leaf_to_remove(
         .iter()
         .enumerate()
         .filter(|&(_, &frequency)| frequency == 1)
-        .find_map(|(symbol_id, _)| predict_leaf_removal(stream, working_leaf_counts, symbol_id, &context.code_lengths_before))
+        .find_map(|(symbol_id, _)| predict_leaf_removal(stream, prediction_buffers, symbol_id, &context.code_lengths_before))
 }
 
 /// Analysis + decision: the first non-saving leaf (biggest loss first) that
 /// can be respelled and is worth removing.
 fn find_leaf_to_remove(
     stream: &SymbolStream,
-    working_leaf_counts: &mut LeafCountsByWeight,
+    prediction_buffers: &mut PredictionBuffers,
     context: &RoundContext,
 ) -> LeafRemovalScan {
     let non_saving_leaf_ids = find_non_saving_leaves(stream, &context.code_lengths_before);
@@ -252,7 +254,7 @@ fn find_leaf_to_remove(
         best_removal_not_lowering: None,
     };
     for symbol_id in non_saving_leaf_ids {
-        match predict_leaf_removal(stream, working_leaf_counts, symbol_id, &context.code_lengths_before) {
+        match predict_leaf_removal(stream, prediction_buffers, symbol_id, &context.code_lengths_before) {
             None => scan.non_saving_leaves_unspellable += 1,
             Some(removal) => {
                 if leaf_removal_lowers_encoded_symbol_bits(&removal, context) {
@@ -311,7 +313,7 @@ fn report_and_apply_leaf_removal(
 /// and the merges come back ranked best first.
 fn predict_and_rank_merges(
     stream: &SymbolStream,
-    working_leaf_counts: &mut LeafCountsByWeight,
+    prediction_buffers: &mut PredictionBuffers,
     merge_candidates: &[MergeCandidate],
     context: &RoundContext,
     removal_scan: &LeafRemovalScan,
@@ -343,7 +345,7 @@ fn predict_and_rank_merges(
             continue;
         }
         let merge =
-            predict_merge(stream, working_leaf_counts, candidate_index, candidate.definition, occurrence_ranges, &context.code_lengths_before);
+            predict_merge(stream, prediction_buffers, candidate_index, candidate.definition, occurrence_ranges, &context.code_lengths_before);
         round.merges_that_lower_the_leaf_count +=
             (merge.leaves_after < context.leaves_before) as u64;
         merges.push(merge);

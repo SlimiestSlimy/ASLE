@@ -1,4 +1,4 @@
-# ASLE — Arbitrary Symbol Length Encoding
+# VaSyLeRE — Variable Symbol Length Ranged Encoder
 
 Compresses a bit stream by building a dictionary of symbols of any length up
 to n bits, then encoding the stream of placed symbols with a prefix code whose
@@ -133,7 +133,7 @@ body: the canonical Huffman code of every placed symbol, range coded bit by bit
 ```
 
 No magic number and no input length: the decoder stops after the placed symbol count, and
-the output length is the sum of the decoded symbols' lengths. ASLE takes an exact bit
+the output length is the sum of the decoded symbols' lengths. VaSyLeRE takes an exact bit
 count; a file's last byte is padded with zeros when written, outside the format.
 Measured against the previous section (gamma(input bits + 1), gamma(longest code length),
 gamma(count + 1) per length): −40 to −48 bits per test file.
@@ -198,7 +198,7 @@ and the byte ending.
 
 ## Measured history (bytes)
 
-### Speed (compression_testbench asle_performance.py; Ryzen 5 5600, one pinned core, median of 3)
+### Speed (compression_testbench vasylere_performance.py; Ryzen 5 5600, one pinned core, median of 3)
 
 Totals over 5 files (ELF /usr/bin/ls, packed 5-bit fields, Rust source, GPL-3 text, vim
 manual), each cut to the size given; every stream decoded back exactly; random bytes are
@@ -333,7 +333,7 @@ manual) is in the test set for larger runs.
 
 - Against general-purpose compressors on the four test files (bits, lower is better):
   PPMd order 6 114,968; bzip2 9 122,368; brotli 11 125,616; LZMA2 9e 130,904;
-  zstd 19 132,064; deflate 9 139,360; ASLE (n = 16, 7/8) 205,616. ASLE is closest on the
+  zstd 19 132,064; deflate 9 139,360; VaSyLeRE (n = 16, 7/8) 205,616. VaSyLeRE is closest on the
   packed 5-bit fields (47,143 against bzip2's 37,696) and about 2.2× the best on binary
   and text. Random grows 39% (the others store it).
 
@@ -396,8 +396,8 @@ manual) is in the test set for larger runs.
 ## Running
 
 ```
-asle compress   <input> <output> --max-symbol-bits <n> [--verbose] [--log <file.jsonl>]
-asle decompress <input> <output>
-asle benchmark  --max-symbol-bits <n> [--verbose] <files...>
+vasylere compress   <input> <output> --max-symbol-bits <n> [--verbose] [--log <file.jsonl>]
+vasylere decompress <input> <output>
+vasylere benchmark  --max-symbol-bits <n> [--verbose] <files...>
 python3 tools/plot_encoder_log.py <file.jsonl> <chart.html>
 ```

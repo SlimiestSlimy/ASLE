@@ -9,6 +9,7 @@
 //! state. Everything else reads it.
 
 use crate::fast_hash::FastHashMap;
+use crate::symbol_bit_trie::SymbolBitTrie;
 use crate::huffman_tree::calculate_code_lengths;
 use crate::leaf_counts_by_weight::LeafCountsByWeight;
 use crate::packed_bit_sequence::PackedBitSequence;
@@ -34,8 +35,15 @@ pub struct SymbolStream {
     pub placed_symbol_ids: Vec<u32>,
     /// n: the largest window size, and so the longest possible symbol.
     pub maximum_symbol_bit_length: u32,
+    /// m: the smallest window size (the user's second parameter, 2026-11-12);
+    /// window sizes are the Fibonacci numbers from m to n. Shorter symbols
+    /// still exist (the one-bit symbols, leaves respelled), only no window
+    /// shorter than m is searched.
+    pub minimum_window_bit_length: u32,
     pub input_bit_count: u64,
     symbol_ids_by_content_hash: FastHashMap<u64, Vec<u32>>,
+    /// Every symbol ever defined, by its bits, for respelling.
+    symbols_by_bits: SymbolBitTrie,
 }
 
 /// Number of leaves: symbols with a nonzero frequency.
@@ -46,8 +54,17 @@ pub fn count_leaves(symbol_frequencies: &[u64]) -> usize {
 impl SymbolStream {
     /// Every input bit (the first `input_bit_count` bits of the bytes) becomes
     /// a placed "0" or "1" symbol.
-    pub fn from_input_bits(input_bytes: &[u8], input_bit_count: u64, maximum_symbol_bit_length: u32) -> Self {
-        assert!(maximum_symbol_bit_length >= 2, "maximum symbol bit length must be at least 2");
+    pub fn from_input_bits(
+        input_bytes: &[u8],
+        input_bit_count: u64,
+        minimum_window_bit_length: u32,
+        maximum_symbol_bit_length: u32,
+    ) -> Self {
+        assert!(minimum_window_bit_length >= 2, "minimum window bit length must be at least 2");
+        assert!(
+            minimum_window_bit_length <= maximum_symbol_bit_length,
+            "minimum window bit length must not exceed the maximum symbol bit length"
+        );
         let mut shared_bit_sequence = PackedBitSequence::from_first_bits_of_bytes(input_bytes, input_bit_count);
         let input_bit_count = shared_bit_sequence.bit_count();
         let mut placed_symbol_ids = Vec::with_capacity(input_bit_count as usize);
@@ -65,8 +82,10 @@ impl SymbolStream {
             leaf_counts_by_weight: LeafCountsByWeight::default(),
             placed_symbol_ids,
             maximum_symbol_bit_length,
+            minimum_window_bit_length,
             input_bit_count,
             symbol_ids_by_content_hash: FastHashMap::default(),
+            symbols_by_bits: SymbolBitTrie::new(),
         };
         stream.add_symbol_definition(SymbolDefinition { first_bit_offset: input_bit_count, bit_length: 1 });
         stream.add_symbol_definition(SymbolDefinition { first_bit_offset: input_bit_count + 1, bit_length: 1 });
@@ -80,6 +99,14 @@ impl SymbolStream {
         let symbol_id = self.symbol_definitions.len() as u32;
         self.symbol_definitions.push(definition);
         self.symbol_ids_by_content_hash.entry(content_hash).or_default().push(symbol_id);
+        self.symbols_by_bits.insert(&self.shared_bit_sequence, definition, symbol_id);
+    }
+
+    /// Every symbol ever defined (alive or dead) whose bits start at
+    /// `first_bit_offset` of the shared bit sequence, at most `most_bits`
+    /// long, shortest first: visit(bit length, symbol id).
+    pub fn for_each_symbol_starting_at(&self, first_bit_offset: u64, most_bits: u32, visit: impl FnMut(u32, u32)) {
+        self.symbols_by_bits.for_each_symbol_starting_at(&self.shared_bit_sequence, first_bit_offset, most_bits, visit);
     }
 
     pub fn hash_definition(&self, definition: SymbolDefinition) -> u64 {

@@ -1,4 +1,4 @@
-//! The ASLE container: the only module that knows the file layout.
+//! The VaSyLeRE container: the only module that knows the file layout.
 //!
 //! Elias gamma(placed symbol count + 1)           (the rest is omitted for empty input)
 //! | symbol prefix tree (see symbol_prefix_tree): skipped full levels, child
@@ -70,6 +70,7 @@ pub struct CompressionReport {
 pub fn compress_input(
     input_bytes: &[u8],
     input_bit_count: u64,
+    minimum_window_bit_length: u32,
     maximum_symbol_bit_length: u32,
     observer: &mut dyn BuilderObserver,
 ) -> (Vec<u8>, CompressionReport) {
@@ -85,7 +86,7 @@ pub fn compress_input(
         return (bit_writer.into_bytes(), report);
     }
 
-    let mut stream = SymbolStream::from_input_bits(input_bytes, input_bit_count, maximum_symbol_bit_length);
+    let mut stream = SymbolStream::from_input_bits(input_bytes, input_bit_count, minimum_window_bit_length, maximum_symbol_bit_length);
     build_symbol_dictionary(&mut stream, observer);
     bit_writer.write_elias_gamma(stream.placed_symbol_ids.len() as u64 + 1);
 

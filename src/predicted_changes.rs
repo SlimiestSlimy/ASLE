@@ -51,7 +51,7 @@ pub fn frequency_after_changes(changes: &[FrequencyChange], symbol_id: usize, fr
 
 /// Turns symbol ids (with repeats) into frequency changes of `delta_per_occurrence`
 /// each, one per symbol, sorted by symbol id.
-pub fn count_into_frequency_changes(mut symbol_ids: Vec<u32>, delta_per_occurrence: i64, changes: &mut Vec<FrequencyChange>) {
+pub fn count_into_frequency_changes(symbol_ids: &mut [u32], delta_per_occurrence: i64, changes: &mut Vec<FrequencyChange>) {
     symbol_ids.sort_unstable();
     for run in symbol_ids.chunk_by(|first, second| first == second) {
         changes.push(FrequencyChange { symbol_id: run[0], delta: delta_per_occurrence * run.len() as i64 });

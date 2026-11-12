@@ -78,13 +78,23 @@ impl LeafCountsByWeight {
     /// Exact sum over leaves of frequency * Huffman code length; a lone symbol
     /// costs 1 bit per occurrence.
     pub fn encoded_symbol_bits(&self) -> u64 {
+        self.encoded_symbol_bits_reusing(&mut MergedRunsBuffer::default())
+    }
+
+    /// The same, with the merged nodes' queue kept in `buffer` between calls,
+    /// so the builder's hot path allocates nothing.
+    pub fn encoded_symbol_bits_reusing(&self, buffer: &mut MergedRunsBuffer) -> u64 {
         match self.leaf_count {
             0 => 0,
             1 => self.runs_lightest_first[0].weight,
-            _ => two_queue_huffman_total(&self.runs_lightest_first, self.leaf_count),
+            _ => two_queue_huffman_total(&self.runs_lightest_first, self.leaf_count, &mut buffer.0),
         }
     }
 }
+
+/// The second queue's storage (merged nodes), reused from total to total.
+#[derive(Default)]
+pub struct MergedRunsBuffer(Vec<WeightRun>);
 
 /// The front of one queue: its runs from `next_run` on, the run at `next_run`
 /// with `taken` of its nodes already used.
@@ -119,15 +129,15 @@ fn push_merged(merged: &mut Vec<WeightRun>, weight: u64, count: u64) {
 /// once (the steps one by one would pair them the same way, as every merged
 /// node is heavier than they are). The total does not depend on which of
 /// several equal weights is taken.
-fn two_queue_huffman_total(leaf_runs: &[WeightRun], leaf_count: u64) -> u64 {
-    let mut merged_runs: Vec<WeightRun> = Vec::new();
+fn two_queue_huffman_total(leaf_runs: &[WeightRun], leaf_count: u64, merged_runs: &mut Vec<WeightRun>) -> u64 {
+    merged_runs.clear();
     let mut leaf_front = QueueFront { next_run: 0, taken: 0 };
     let mut merged_front = QueueFront { next_run: 0, taken: 0 };
     let mut nodes_left = leaf_count;
     let mut total = 0u64;
     while nodes_left > 1 {
         let lightest_leaves = front_run(leaf_runs, &leaf_front);
-        let lightest_merged = front_run(&merged_runs, &merged_front);
+        let lightest_merged = front_run(merged_runs, &merged_front);
         let leaves_are_lightest = match (lightest_leaves, lightest_merged) {
             (Some(leaves), Some(merged)) => leaves.weight <= merged.weight,
             (Some(_), None) => true,
@@ -139,21 +149,21 @@ fn two_queue_huffman_total(leaf_runs: &[WeightRun], leaf_count: u64) -> u64 {
             if leaves_are_lightest {
                 take_from(leaf_runs, &mut leaf_front, 2 * pairs);
             } else {
-                take_from(&merged_runs, &mut merged_front, 2 * pairs);
+                take_from(merged_runs, &mut merged_front, 2 * pairs);
             }
             total += pairs * 2 * lightest.weight;
             nodes_left -= pairs;
-            push_merged(&mut merged_runs, 2 * lightest.weight, pairs);
+            push_merged(merged_runs, 2 * lightest.weight, pairs);
             continue;
         }
         // A single lightest node pairs with the next lightest, from either queue.
         if leaves_are_lightest {
             take_from(leaf_runs, &mut leaf_front, 1);
         } else {
-            take_from(&merged_runs, &mut merged_front, 1);
+            take_from(merged_runs, &mut merged_front, 1);
         }
         let next_leaves = front_run(leaf_runs, &leaf_front);
-        let next_merged = front_run(&merged_runs, &merged_front);
+        let next_merged = front_run(merged_runs, &merged_front);
         let next_is_leaf = match (next_leaves, next_merged) {
             (Some(leaves), Some(merged)) => leaves.weight <= merged.weight,
             (Some(_), None) => true,
@@ -164,13 +174,13 @@ fn two_queue_huffman_total(leaf_runs: &[WeightRun], leaf_count: u64) -> u64 {
             next_leaves.unwrap().weight
         } else {
             let weight = next_merged.unwrap().weight;
-            take_from(&merged_runs, &mut merged_front, 1);
+            take_from(merged_runs, &mut merged_front, 1);
             weight
         };
         let merged_weight = lightest.weight + next_weight;
         total += merged_weight;
         nodes_left -= 1;
-        push_merged(&mut merged_runs, merged_weight, 1);
+        push_merged(merged_runs, merged_weight, 1);
     }
     total
 }

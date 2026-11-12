@@ -39,8 +39,8 @@ fn quoted_symbol_names(stream: &SymbolStream, symbol_ids: impl Iterator<Item = u
 impl BuilderObserver for JsonLinesEncoderLog {
     fn on_build_started(&mut self, stream: &SymbolStream) {
         let fields = format!(
-            "\"input_bits\":{},\"maximum_symbol_bit_length\":{},",
-            stream.input_bit_count, stream.maximum_symbol_bit_length
+            "\"input_bits\":{},\"minimum_window_bit_length\":{},\"maximum_symbol_bit_length\":{},",
+            stream.input_bit_count, stream.minimum_window_bit_length, stream.maximum_symbol_bit_length
         );
         self.write_line("build_started", fields, stream);
     }
